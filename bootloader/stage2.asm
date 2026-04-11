@@ -37,6 +37,7 @@ stage2_start:
     mov  es, ax
     mov  ss, ax
     mov  sp, 0x7C00
+    mov  [boot_drive], dl      ; save BIOS boot drive before any modifications
     sti
 
     ; Mode 3: 80x25 colour text, clear screen
@@ -158,6 +159,34 @@ stage2_start:
     mov  si, msg_a20_ok
     call print_color_str
 
+    ; ------------------------------------------------------------------
+    ; Load kernel from disk   (CHS sector 7 = LBA 6)  to 0x100000
+    ; With A20 enabled, ES=0xFFFF / BX=0x0010 => physical 0xFFFF0+0x10
+    ;                                           = 0x100000
+    ; ------------------------------------------------------------------
+    mov  si, msg_kernel_load
+    call print_color_str
+
+    mov  ax, 0xFFFF
+    mov  es, ax
+    mov  bx, 0x0010             ; ES:BX => physical 0x100000
+    mov  ah, 0x02               ; BIOS read sectors
+    mov  al, 64                 ; 64 sectors = 32 KB (plenty for initial kernel)
+    mov  ch, 0                  ; cylinder 0
+    mov  cl, 7                  ; CHS sector 7 = LBA 6
+    mov  dh, 0                  ; head 0
+    mov  dl, [boot_drive]       ; boot drive saved at entry
+    int  0x13
+    jc   .kernel_err
+
+    ; Restore ES=0 before protected-mode transition
+    xor  ax, ax
+    mov  es, ax
+
+    mov  si, msg_kernel_ok
+    call print_color_str
+    ; ------------------------------------------------------------------
+
     lgdt [gdt_descriptor]
 
     mov  si, msg_gdt_ok
@@ -174,8 +203,13 @@ stage2_start:
     call print_color_str
     jmp  hang
 
+.kernel_err:
+    mov  si, msg_kernel_fail
+    call print_color_str
+    jmp  hang
+
 ; ===========================================================================
-;  32-bit protected mode stub  (Phase 4 will replace with kernel jump)
+;  32-bit protected mode — jump to kernel at 0x100000
 ; ===========================================================================
 [BITS 32]
 pm_entry:
@@ -185,44 +219,11 @@ pm_entry:
     mov  fs, ax
     mov  gs, ax
     mov  ss, ax
-    mov  esp, 0x90000
+    mov  esp, 0x9FC00           ; kernel stack (below BIOS data area)
 
-    ; Clear VGA screen to black
-    mov  edi, 0xB8000
-    mov  ecx, 80*25
-    mov  ax,  0x0720           ; space, light-grey on black
-    rep  stosw
-
-    ; Print PM confirmation in bright green, top-left
-    mov  edi, 0xB8000
-    mov  esi, pm_line1
-    mov  ah,  ATTR_GREEN
-.l1: lodsb
-    test al, al
-    jz   .l1done
-    mov  [edi], ax
-    add  edi, 2
-    jmp  .l1
-.l1done:
-
-    mov  edi, 0xB8000 + 80*2   ; row 1 (0-based)
-    mov  esi, pm_line2
-    mov  ah,  ATTR_ACCENT
-.l2: lodsb
-    test al, al
-    jz   .l2done
-    mov  [edi], ax
-    add  edi, 2
-    jmp  .l2
-.l2done:
-
-    cli
-.pm_halt:
-    hlt
-    jmp  .pm_halt
-
-pm_line1  db 'PD-OS >> 32-bit Protected Mode Active', 0
-pm_line2  db 'Kernel entry point pending (Phase 4).  System halted.', 0
+    ; Jump to kernel entry point
+    mov  eax, 0x100000
+    jmp  eax                    ; transfer control to PD-Kernel
 
 ; ===========================================================================
 ;  Back to 16-bit
@@ -731,6 +732,7 @@ null_idtr:
 selected    db 0
 countdown   db MENU_TIMEOUT
 cur_attr    db ATTR_NORMAL
+boot_drive  db 0x80            ; BIOS drive number saved at entry
 
 ; Logo - pure ASCII, no backslash art, fits 74 chars
 ;        PD-OS spelled with simple block letters
@@ -761,6 +763,9 @@ msg_boot_start  db 0x0D, 0x0A
 msg_a20_ok      db ' >> A20 enabled.', 0x0D, 0x0A, 0
 msg_a20_fail    db ' [ERROR] A20 enable failed. System halted.', 0x0D, 0x0A, 0
 msg_gdt_ok      db ' >> GDT loaded. Entering protected mode...', 0x0D, 0x0A, 0
+msg_kernel_load db ' >> Loading kernel...', 0x0D, 0x0A, 0
+msg_kernel_ok   db ' >> Kernel loaded at 0x100000.', 0x0D, 0x0A, 0
+msg_kernel_fail db ' [ERROR] Failed to load kernel from disk!', 0x0D, 0x0A, 0
 msg_bios        db 0x0D, 0x0A
                 db ' >> Resetting system to BIOS/firmware...', 0x0D, 0x0A
                 db ' >> Please press your BIOS key (Del / F2 / F12) when POST starts.', 0x0D, 0x0A, 0
