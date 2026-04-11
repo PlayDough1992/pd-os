@@ -19,7 +19,8 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 
 - ✅ Custom bootloader (no GRUB dependency)
 - ✅ 32-bit x86 kernel
-- ⬜ Command-line interface (CLI) with scripting
+- ✅ User account system (login, passwords, uid)
+- ✅ Command-line interface (PD-Shell Tier 1)
 - ⬜ Process management and multitasking
 - ⬜ Filesystem support
 - ⬜ Graphical desktop environment (future)
@@ -28,23 +29,44 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 
 ## 📋 Current Status
 
-**Phase 2 - PD-Bootloader Stage 1: COMPLETE ✓**
+**Phase 6 - PD-Shell + User System: COMPLETE ✓**
 
 ### Completed
-- ✅ Project directory structure created
+- ✅ Project directory structure and build system
 - ✅ PD-Bootloader Stage 1 (512-byte MBR)
-- ✅ Build system (Makefile)
-- ✅ Toolchain setup documentation
-- ✅ Bootloader displays welcome message
-- ✅ Boots successfully in QEMU
+- ✅ PD-Bootloader Stage 2 (A20, GDT, protected mode, kernel loader with TUI)
+- ✅ PD-Kernel foundation (VGA text driver, kprintf, panic)
+- ✅ IDT, PIC, PIT (100 Hz), keyboard driver (full scancode Set 1)
+- ✅ PD-Shell Tier 1 (readline, built-in commands, color prompt)
+- ✅ User account system (login screen, FNV-1a password hashing, uid/flags)
 
-### In Progress
-- 🔄 Toolchain installation (NASM, i686-elf-gcc)
+### Default User Accounts
 
-### Next Steps (Phase 3)
-- ⬜ PD-Bootloader Stage 2 (A20, GDT, protected mode)
-- ⬜ Load kernel from disk
-- ⬜ Switch to 32-bit protected mode
+| Username | Password | UID | Role |
+|----------|----------|-----|------|
+| `root`   | `root`   | 0   | Superuser (`USER_FLAG_ROOT`) |
+| `pd`     | `pd`     | 1   | Standard user |
+
+> Passwords are hashed with FNV-1a 32-bit at boot. Plaintext is zeroed from memory immediately after hashing.
+
+### Shell Built-in Commands
+
+| Command | Description |
+|---------|-------------|
+| `help` | Show all commands |
+| `clear` | Clear the screen |
+| `echo [text]` | Print text |
+| `version` | Show kernel/shell version |
+| `uptime` | Show uptime in seconds |
+| `color [fg] [bg]` | Set text color (0-15) |
+| `whoami` | Show current user and uid |
+| `logout` | Log out → return to login screen |
+| `reboot` | Reboot the system |
+
+### Next Steps (Phase 7)
+- ⬜ Physical memory manager (bitmap allocator)
+- ⬜ Paging / virtual memory
+- ⬜ Kernel heap (kmalloc/kfree)
 
 ---
 
@@ -61,9 +83,11 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 **📖 See detailed installation instructions:** [tools/setup.md](tools/setup.md)
 
 **Quick setup verification:**
-```powershell
+```bash
 # Check what's installed
 make setup-check
+# or
+./build.sh setup-check
 ```
 
 ### 2. Build the Bootloader
@@ -122,8 +146,11 @@ Custom-Bootloader-Kernel-CLI-GUI/
 │   └── libc/               # Minimal C library
 │
 ├── tools/                   # Build tools and scripts
-│   ├── setup.md            # ✅ Toolchain installation guide
-│   └── create-image.ps1    # ✅ Disk image builder (PowerShell)
+│   ├── setup.md            # ✅ Toolchain installation guide (Linux)
+│   ├── autosetup.sh        # ✅ Automated setup script
+│   ├── create-image.sh     # ✅ Disk image builder
+│   ├── simple-setup.sh     # ✅ Interactive step-by-step setup
+│   └── quick-setup.sh      # ✅ Quick toolchain status checker
 │
 ├── build/                   # Build output (generated)
 │   ├── bootloader.bin      # Compiled bootloader
@@ -163,14 +190,18 @@ If Make is not available:
 nasm -f bin bootloader/stage1.asm -o build/bootloader.bin
 
 # 2. Verify size (must be exactly 512 bytes)
-# PowerShell:
-(Get-Item build/bootloader.bin).Length
+wc -c < build/bootloader.bin
 
-# 3. Create disk image (PowerShell)
-.\tools\create-image.ps1
+# 3. Create disk image
+./tools/create-image.sh
 
 # 4. Run in QEMU
 qemu-system-i386 -drive format=raw,file=build/pd-os.img -m 128M
+```
+
+Or simply:
+```bash
+./build.sh run
 ```
 
 ---
@@ -195,46 +226,54 @@ qemu-system-i386 -drive format=raw,file=build/pd-os.img -m 128M
 - ✅ BIOS interrupts for display
 - ✅ Boot signature
 
-### Phase 3: Bootloader Stage 2 (Week 2-3)
+### Phase 3: Bootloader Stage 2 ✅ COMPLETE
 - A20 line enabling
 - GDT setup
 - Protected mode transition
-- Kernel loading
+- Kernel loading with TUI boot menu
 
-### Phase 4: Kernel Foundation (Week 4)
+### Phase 4: Kernel Foundation ✅ COMPLETE
 - Kernel entry point
-- VGA text mode driver
-- printf() implementation
-- Basic kernel infrastructure
+- VGA text mode driver (80x25, color, hardware cursor)
+- kprintf() implementation
+- Kernel panic handler
 
-### Phase 5: Interrupts & Exceptions (Week 5)
+### Phase 5: Interrupts & Exceptions ✅ COMPLETE
 - IDT setup
 - Exception handlers
-- Timer and keyboard interrupts
+- PIC remapping, PIT @ 100 Hz, keyboard driver (full Set 1)
 
-### Phase 6: Memory Management (Week 6)
+### Phase 6: PD-Shell + User System ✅ COMPLETE
+- Login screen with 3-attempt lockout
+- FNV-1a password hashing (plaintext zeroed after boot)
+- User table with uid and root flag
+- PD-Shell with readline, mid-line editing, color prompt
+- Built-ins: help, clear, echo, version, uptime, color, whoami, logout, reboot
+
+### Phase 7: Memory Management
 - Physical memory allocator
 - Paging
 - Virtual memory
 - Kernel heap (kmalloc/kfree)
 
-### Phase 7: Filesystem (Week 7-8)
+### Phase 8: Filesystem
 - ATA disk driver
 - FAT12 or simple custom FS
 - VFS layer
 - File and directory operations
+- Migrate user table to /etc/passwd
 
-### Phase 8: Process Management (Week 9)
+### Phase 9: Process Management
 - Process Control Blocks
 - Context switching
 - Round-robin scheduler
-- User mode separation
+- User mode separation (ring 3)
 
-### Phase 9: CLI Shell (Week 10-11)
-- Command parser
-- Built-in commands (ls, cat, echo, etc.)
-- Simple scripting
-- Tab completion and history
+### Phase 10: CLI Shell Tier 2
+- Command parser with scripting
+- Built-in commands (ls, cat, mkdir, etc.)
+- Tab completion and command history
+- Pipe and redirect support
 
 ### Phase 10: Integration & Polish (Week 12)
 - Boot optimization
@@ -401,7 +440,7 @@ This project is open source and available for educational purposes.
 ## 🎓 About
 
 **Project**: PD-OS  
-**Version**: 0.1.0 (Phase 2 Complete)  
+**Version**: 0.1.0 (Phase 6 Complete)  
 **Started**: April 2026  
 **Target**: Custom 32-bit x86 operating system  
 **Learning Focus**: Low-level programming, OS architecture, systems development
@@ -428,5 +467,5 @@ This project is open source and available for educational purposes.
 
 ---
 
-**Status**: Phase 2 Complete ✓ | Ready for Phase 3  
+**Status**: Phase 6 Complete ✓ | Ready for Phase 7 (Memory Management)  
 **Last Updated**: April 11, 2026
