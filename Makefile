@@ -35,7 +35,7 @@ OBJCOPY = i686-linux-gnu-objcopy
 ASMFLAGS = -f binASMFLAGS  = -f bin
 # Compiler flags for kernel (will be used later)
 CFLAGS = -m32 -ffreestanding -nostdlib -nostdinc -fno-builtin -fno-stack-protector \
-         -nostartfiles -nodefaultlibs -Wall -Wextra -Werror -c
+         -nostartfiles -nodefaultlibs -fno-pic -fno-pie -Wall -Wextra -Werror -c
 
 # Linker flags
 LDFLAGS = -m elf_i386 -nostdlib

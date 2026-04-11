@@ -1,10 +1,14 @@
 /* ============================================================================
- * PD-Kernel  —  kernel_main()  (Phase 4: Foundation)
+ * PD-Kernel  —  kernel_main()  (Phase 5: Interrupts, PIC, PIT, Keyboard)
  * ============================================================================ */
 
 #include "kernel.h"
 #include "vga.h"
 #include "io.h"
+#include "idt.h"
+#include "pic.h"
+#include "pit.h"
+#include "keyboard.h"
 
 void kernel_main(void)
 {
@@ -14,31 +18,58 @@ void kernel_main(void)
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     kprintf("============================================================\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("  PD-OS Kernel  v0.1  -  Phase 4: Foundation\n");
+    kprintf("         PD-Kernel  v0.1  -  Phase 5: Interrupts\n            ");
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     kprintf("============================================================\n");
 
-    /* ---- System info ----------------------------------------------------- */
-    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-    kprintf("\n  [OK] Kernel entry reached.\n");
+    /* ---- Subsystem init -------------------------------------------------- */
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("  Architecture : x86  (32-bit Protected Mode)\n");
-    kprintf("  VGA driver   : 80x25 text mode @ 0xB8000\n");
-    kprintf("  Kernel base  : 0x100000\n");
-    kprintf("  Stack        : 0x9FC00\n");
 
-    /* ---- kprintf test ---------------------------------------------------- */
+    kprintf("  [..] Waking up IDT...");
+    idt_init();
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf(" OK\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    kprintf("  [..] Waking up PIC...");
+    pic_init();
+    /* Mask everything; PIT + keyboard init will unmask their own IRQs */
+    pic_mask_irq(0); pic_mask_irq(1); pic_mask_irq(2); pic_mask_irq(3);
+    pic_mask_irq(4); pic_mask_irq(5); pic_mask_irq(6); pic_mask_irq(7);
+    pic_mask_irq(8); pic_mask_irq(9); pic_mask_irq(10); pic_mask_irq(11);
+    pic_mask_irq(12); pic_mask_irq(13); pic_mask_irq(14); pic_mask_irq(15);
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf(" OK\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    kprintf("  [..] Waking up PIT @ 100 Hz...");
+    pit_init(100);
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf(" OK\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    kprintf("  [..] Waking up keyboard...");
+    keyboard_init();
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf(" OK\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    /* ---- Enable interrupts ----------------------------------------------- */
+    __asm__ volatile ("sti");
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("\n  Interrupts online.\n");
+
+    /* ---- Keyboard echo loop ---------------------------------------------- */
     vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("\n  --- kprintf test ---\n");
+    kprintf("\n  Type something (keyboard echo test):\n  > ");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("  decimal  : %d\n", 42);
-    kprintf("  hex      : 0x%x\n", 0xDEADBEEF);
-    kprintf("  string   : %s\n", "Hello from PD-OS!");
 
-    /* ---- Done ------------------------------------------------------------ */
-    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-    kprintf("\n  PD-OS is running. System halted.\n");
-
-    for (;;)
-        __asm__ volatile ("hlt");
+    for (;;) {
+        char c = keyboard_getchar();
+        if (c == '\n' || c == '\r') {
+            kprintf("\n  > ");
+        } else {
+            vga_putchar(c);
+        }
+    }
 }

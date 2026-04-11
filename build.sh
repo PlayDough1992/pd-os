@@ -34,6 +34,7 @@ CROSS_OBJCOPY="i686-linux-gnu-objcopy"
 # Compiler / linker flags
 CFLAGS="-m32 -ffreestanding -nostdlib -nostdinc -fno-builtin \
         -fno-stack-protector -nostartfiles -nodefaultlibs \
+        -fno-pic -fno-pie \
         -Wall -Wextra -c"
 IFLAGS="-I$KERNEL_DIR/include"
 LDFLAGS="-m elf_i386 -nostdlib"
@@ -69,18 +70,30 @@ build() {
     echo -e "${CYAN}  [3] Compiling kernel...${NC}"
 
     nasm -f elf32 "$KERNEL_DIR/arch/x86/entry.asm" -o "$BUILD_DIR/entry.o"
+    nasm -f elf32 "$KERNEL_DIR/arch/x86/idt.asm"   -o "$BUILD_DIR/idt_stubs.o"
 
-    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/vga.c"   -o "$BUILD_DIR/vga.o"
-    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/io.c"       -o "$BUILD_DIR/io.o"
-    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/panic.c"    -o "$BUILD_DIR/panic.o"
-    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/kernel.c"   -o "$BUILD_DIR/kernel_main.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/vga.c"          -o "$BUILD_DIR/vga.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/io.c"              -o "$BUILD_DIR/io.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/panic.c"           -o "$BUILD_DIR/panic.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/arch/x86/idt.c"         -o "$BUILD_DIR/idt.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/arch/x86/pic.c"         -o "$BUILD_DIR/pic.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/arch/x86/exceptions.c"  -o "$BUILD_DIR/exceptions.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/pit.c"          -o "$BUILD_DIR/pit.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/keyboard.c"     -o "$BUILD_DIR/keyboard.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/kernel.c"          -o "$BUILD_DIR/kernel_main.o"
 
     echo -e "${CYAN}  [4] Linking kernel...${NC}"
     $CROSS_LD $LDFLAGS -T "$KERNEL_DIR/linker.ld" \
         "$BUILD_DIR/entry.o" \
+        "$BUILD_DIR/idt_stubs.o" \
         "$BUILD_DIR/vga.o" \
         "$BUILD_DIR/io.o" \
         "$BUILD_DIR/panic.o" \
+        "$BUILD_DIR/idt.o" \
+        "$BUILD_DIR/pic.o" \
+        "$BUILD_DIR/exceptions.o" \
+        "$BUILD_DIR/pit.o" \
+        "$BUILD_DIR/keyboard.o" \
         "$BUILD_DIR/kernel_main.o" \
         -o "$KERNEL_ELF"
 
