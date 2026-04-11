@@ -1,6 +1,17 @@
-# PD-OS - Custom Operating System
+# PD-OS - A Completely Custom Operating System
 
-**A complete 32-bit operating system built from scratch, featuring a custom bootloader (PD-Bootloader), kernel (PD-Kernel), CLI, and eventual GUI.**
+## 🌟 About
+
+**A completely open source brand new operating system, custom bootloader, kernel, CLI and GUI.**
+
+PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is a completely custom operating system built from the ground up.
+
+- ⚙️ **Custom Bootloader** - No GRUB, we built our own (PD-Bootloader)
+- 🔧 **Custom Kernel** - Not the Linux kernel, not any existing kernel (PD-Kernel)
+- 💻 **Custom CLI & GUI** - No Linux desktop environments, everything is original
+- 🤝 **Community Driven** - Like Linux in spirit, but completely independent in code
+
+**We are hoping the dev communities will reach out to help with this project!** This is an ambitious undertaking to create a truly new operating system from scratch. All contributions, ideas, and collaboration are welcome.
 
 ---
 
@@ -318,19 +329,72 @@ wc -c build/bootloader.bin   # Git Bash
 
 ## 🤝 Contributing
 
-This is a learning project, but suggestions and improvements are welcome!
+**We Need Your Help!** This is an ambitious project to build a completely new operating system from scratch, and we're actively seeking contributors from the developer community.
 
-Areas for improvement:
-- Better error handling in build scripts
-- Additional Windows compatibility
-- Debugging guides
-- Code comments and documentation
+### How You Can Help
+
+**🔧 Development Areas:**
+- Bootloader enhancements (Stage 2, disk loading, memory detection)
+- Kernel development (memory management, process scheduling, drivers)
+- Filesystem implementation
+- CLI shell and commands
+- GUI framework (future)
+- Device drivers (keyboard, mouse, storage, graphics)
+
+**📚 Documentation:**
+- Improve setup guides for different platforms
+- Write tutorials and how-to guides
+- Create architecture documentation
+- Comment and explain complex code sections
+
+**🧪 Testing:**
+- Test on different hardware configurations
+- Report bugs and issues
+- Validate build process on various systems
+- Performance testing and optimization
+
+**🎨 Design:**
+- UI/UX design for future GUI
+- CLI interface improvements
+- Visual identity and branding
+
+### Getting Started
+
+1. **Fork the repository** on GitHub
+2. **Clone your fork**: `git clone https://github.com/YOUR-USERNAME/pd-os.git`
+3. **Create a branch**: `git checkout -b feature/your-feature-name`
+4. **Make your changes** and test thoroughly
+5. **Commit**: `git commit -m "Description of changes"`
+6. **Push**: `git push origin feature/your-feature-name`
+7. **Create a Pull Request** on GitHub
+
+### Code Style
+
+- Assembly: NASM syntax, clear comments explaining what and why
+- C (future): K&R style, descriptive variable names
+- Keep code readable - we're building something from scratch, clarity matters!
+
+### Communication
+
+- Open issues for bugs, features, or questions
+- Discuss major changes before implementing
+- Be respectful and collaborative - we're all learning!
+
+### What We're Looking For
+
+- **Experienced OS developers** - Architecture guidance and code reviews
+- **Low-level programmers** - Assembly, C, system programming
+- **Hardware enthusiasts** - Driver development, hardware debugging
+- **Educators** - Help make this a great learning resource
+- **Beginners** - Everyone starts somewhere! Documentation and testing are valuable
+
+**Together, we can build something amazing!** 🚀
 
 ---
 
 ## 📝 License
 
-This project is for educational purposes.
+This project is open source and available for educational purposes.
 
 ---
 
