@@ -61,9 +61,11 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 **📖 See detailed installation instructions:** [tools/setup.md](tools/setup.md)
 
 **Quick setup verification:**
-```powershell
+```bash
 # Check what's installed
 make setup-check
+# or
+./build.sh setup-check
 ```
 
 ### 2. Build the Bootloader
@@ -122,8 +124,11 @@ Custom-Bootloader-Kernel-CLI-GUI/
 │   └── libc/               # Minimal C library
 │
 ├── tools/                   # Build tools and scripts
-│   ├── setup.md            # ✅ Toolchain installation guide
-│   └── create-image.ps1    # ✅ Disk image builder (PowerShell)
+│   ├── setup.md            # ✅ Toolchain installation guide (Linux)
+│   ├── autosetup.sh        # ✅ Automated setup script
+│   ├── create-image.sh     # ✅ Disk image builder
+│   ├── simple-setup.sh     # ✅ Interactive step-by-step setup
+│   └── quick-setup.sh      # ✅ Quick toolchain status checker
 │
 ├── build/                   # Build output (generated)
 │   ├── bootloader.bin      # Compiled bootloader
@@ -163,14 +168,18 @@ If Make is not available:
 nasm -f bin bootloader/stage1.asm -o build/bootloader.bin
 
 # 2. Verify size (must be exactly 512 bytes)
-# PowerShell:
-(Get-Item build/bootloader.bin).Length
+wc -c < build/bootloader.bin
 
-# 3. Create disk image (PowerShell)
-.\tools\create-image.ps1
+# 3. Create disk image
+./tools/create-image.sh
 
 # 4. Run in QEMU
 qemu-system-i386 -drive format=raw,file=build/pd-os.img -m 128M
+```
+
+Or simply:
+```bash
+./build.sh run
 ```
 
 ---

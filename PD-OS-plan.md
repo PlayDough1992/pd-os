@@ -5,7 +5,7 @@ Custom 32-bit operating system with custom bootloader (PD-Bootloader), kernel (P
 
 **Target**: 32-bit x86 (i686)  (will be building a 64-bit x86 version later)
 **Timeline**: 2-3 months for bootloader + kernel + CLI  
-**Environment**: Windows with MinGW/Cygwin toolchain  (create a linux environment later)
+**Environment**: Linux (Ubuntu/Debian/Arch/Fedora) with native GCC cross-compiler toolchain
 **Testing**: QEMU emulator
 
 ---
@@ -26,40 +26,38 @@ Custom 32-bit operating system with custom bootloader (PD-Bootloader), kernel (P
 **What Actually Happened:**
 1. ✅ Created complete project directory structure
 2. ✅ QEMU was already installed (version 10.1.0)
-3. ⚠️ **Chocolatey not available** - Had to use alternative installation methods
-4. ⚠️ **NASM installer had PATH issues** - Solved by using portable version
-5. ✅ Downloaded portable NASM 2.16.03 (no installation required!)
-6. ✅ Created PowerShell build scripts as alternative to Make
-7. ✅ Created automated setup scripts for future use
-8. ⚠️ **i686-elf-gcc download failed** (large file) - Deferred to Phase 4 (not needed yet)
+3. ✅ NASM installed via package manager (`nasm` in apt/dnf/pacman)
+4. ✅ Created bash build scripts as the primary build system
+5. ✅ Created automated setup scripts for future use
+6. ⚠️ **i686-elf-gcc not yet needed** - Deferred to Phase 4 (kernel development)
 
 **Key Solutions:**
-- Used **portable NASM** instead of installer (`tools-download/nasm/nasm.exe`)
-- Created `build.ps1` PowerShell script instead of Makefile
-- Created three setup scripts:
-  - `tools/autosetup.ps1` - Fully automated setup
-  - `tools/simple-setup.ps1` - Interactive step-by-step guide
-  - `tools/quick-setup.ps1` - Quick download helper
+- Used **system NASM** installed via package manager
+- Created `build.sh` bash script and `Makefile` for builds
+- Created three Linux setup scripts:
+  - `tools/autosetup.sh` - Fully automated setup (detects distro)
+  - `tools/simple-setup.sh` - Interactive step-by-step guide
+  - `tools/quick-setup.sh` - Quick toolchain status checker
 
 **Relevant files:**
-- `tools/setup.md` - Comprehensive toolchain installation guide
-- `tools/MANUAL_INSTALL.md` - Manual installation instructions
-- `tools/autosetup.ps1` - Automated setup script
-- `build.ps1` - PowerShell build system (uses portable NASM)
-- `Makefile` - Traditional Make build configuration (for Git Bash)
+- `tools/setup.md` - Comprehensive toolchain installation guide (Linux)
+- `tools/MANUAL_INSTALL.md` - Manual installation instructions (Linux)
+- `tools/autosetup.sh` - Automated setup script
+- `build.sh` - Bash build system
+- `Makefile` - Traditional Make build configuration
 - `bootloader/stage1.asm` - Bootloader source
 
 **Verification:**
 1. ✅ QEMU: `qemu-system-i386 --version` → version 10.1.0
-2. ✅ NASM: Portable version at `tools-download/nasm/nasm.exe`
+2. ✅ NASM: installed via package manager
 3. ⏸️ i686-elf-gcc: Deferred to Phase 4 (kernel development)
-4. ✅ Git Bash detected (includes Make)
+4. ✅ Make: available on Linux by default
 
 **Lessons Learned:**
-- Windows toolchain setup is challenging - portable tools work better
-- PowerShell scripts provide good alternative to Make on Windows
-- Automated installation requires administrator privileges - manual is sometimes easier
-- Can build and test bootloader without cross-compiler (only needed for kernel)
+- Linux toolchain setup is straightforward via package managers (apt/dnf/pacman)
+- `Makefile` + `build.sh` provide a clean dual build system
+- Cross-compiler is only needed starting at Phase 4 — no need to install it early
+- `dd` and `nasm` are the only tools needed for Phase 1–3
 
 ---
 
@@ -77,50 +75,41 @@ Custom 32-bit operating system with custom bootloader (PD-Bootloader), kernel (P
 7. ✅ Tested successfully in QEMU - **IT WORKS!**
 
 **Build Process:**
-```powershell
-# Download portable NASM (if not already downloaded)
-Invoke-WebRequest -Uri "https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/win64/nasm-2.16.03-win64.zip" -OutFile tools-download\nasm-portable.zip
-Exp✅ Bootloader binary is exactly 512 bytes
-2. ✅ Boot signature (0xAA55) present at bytes 510-511
-3. ✅ QEMU boots and displays welcome message
-4. ✅ Segment registers initialized correctly (DS, ES, SS = 0)
-5. ✅ Stack pointer set at 0x7C00
-6. ✅ BIOS INT 10h successfully prints text to screen
-7. ✅ System halts cleanly after displaying messages
+```bash
+# Install NASM (if not yet installed)
+sudo apt-get install nasm   # Ubuntu/Debian
+# sudo dnf install nasm     # Fedora
+# sudo pacman -S nasm       # Arch
 
-**Key Achievement:**
-🎉 **BOOTLOADER SUCCESSFULLY BOOTS!** This is a real, working bootloader that could run on actual hardware. The system boots from power-on, loads our 512-byte code at 0x7C00, and executes it perfectly!
-
-**Next Steps:**
-Phase 3 will implement Stage 2 to load the kernel and switch to protected mode.
-.\tools-download\nasm\nasm.exe -f bin bootloader\stage1.asm -o build\bootloader.bin
+# Build bootloader
+nasm -f bin bootloader/stage1.asm -o build/bootloader.bin
 
 # Verify size (must be exactly 512 bytes)
-(Get-Item build\bootloader.bin).Length  # Output: 512
+wc -c < build/bootloader.bin   # Output: 512
 
-# Create bootable disk image
-$blank = New-Object byte[] (1474560)  # 1.44MB floppy
-[IO.File]::WriteAllBytes("build\pd-os.img", $blank)
-$boot = [IO.File]::ReadAllBytes("build\bootloader.bin")
-$disk = [IO.File]::ReadAllBytes("build\pd-os.img")
-for ($i=0; $i -lt 512; $i++) { $disk[$i] = $boot[$i] }
-[IO.File]::WriteAllBytes("build\pd-os.img", $disk)
+# Create 1.44MB blank floppy image
+dd if=/dev/zero of=build/pd-os.img bs=512 count=2880
+
+# Write bootloader to first sector
+dd if=build/bootloader.bin of=build/pd-os.img conv=notrunc bs=512 count=1
 
 # Run in QEMU
-qemu-system-i386 -drive format=raw,file=build\pd-os.img -m 128M
+qemu-system-i386 -drive format=raw,file=build/pd-os.img -m 128M
 ```
 
 **Or simply:**
-```powershell
-.\build.ps1 run
+```bash
+./build.sh run
+# or
+make run
 ```
 
 **Relevant files:**
 - `bootloader/stage1.asm` - MBR bootloader source (exactly 512 bytes) ✅
 - `build/bootloader.bin` - Compiled bootloader binary ✅
 - `build/pd-os.img` - Bootable 1.44MB disk image ✅
-- `build.ps1` - PowerShell build script ✅
-- `tools/create-image.ps1` - Disk image creation script ✅
+- `build.sh` - Bash build script ✅
+- `tools/create-image.sh` - Disk image creation script ✅
 - `bootloader/README.md` - Comprehensive documentation ✅
 
 **Boot Output:**
