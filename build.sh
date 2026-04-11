@@ -80,6 +80,9 @@ build() {
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/arch/x86/exceptions.c"  -o "$BUILD_DIR/exceptions.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/pit.c"          -o "$BUILD_DIR/pit.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/keyboard.c"     -o "$BUILD_DIR/keyboard.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/users.c"           -o "$BUILD_DIR/users.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/login.c"           -o "$BUILD_DIR/login.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/shell.c"            -o "$BUILD_DIR/shell.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/kernel.c"          -o "$BUILD_DIR/kernel_main.o"
 
     echo -e "${CYAN}  [4] Linking kernel...${NC}"
@@ -94,6 +97,9 @@ build() {
         "$BUILD_DIR/exceptions.o" \
         "$BUILD_DIR/pit.o" \
         "$BUILD_DIR/keyboard.o" \
+        "$BUILD_DIR/users.o" \
+        "$BUILD_DIR/login.o" \
+        "$BUILD_DIR/shell.o" \
         "$BUILD_DIR/kernel_main.o" \
         -o "$KERNEL_ELF"
 

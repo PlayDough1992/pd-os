@@ -1,5 +1,5 @@
 /* ============================================================================
- * PD-Kernel  —  kernel_main()  (Phase 5: Interrupts, PIC, PIT, Keyboard)
+ * PD-Kernel  —  kernel_main()  (Phase 6: PD-Shell + User System)
  * ============================================================================ */
 
 #include "kernel.h"
@@ -9,6 +9,9 @@
 #include "pic.h"
 #include "pit.h"
 #include "keyboard.h"
+#include "users.h"
+#include "login.h"
+#include "shell.h"
 
 void kernel_main(void)
 {
@@ -18,7 +21,7 @@ void kernel_main(void)
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     kprintf("============================================================\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("         PD-Kernel  v0.1  -  Phase 5: Interrupts\n");
+    kprintf("      PD-Kernel  v0.1  -  Phase 6: PD-Shell + Users\n");
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     kprintf("============================================================\n");
 
@@ -54,57 +57,24 @@ void kernel_main(void)
     kprintf("  (X) COMPLETE\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
+    kprintf("  (0) Initialising user table...");
+    users_init();
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("  (X) COMPLETE\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
     /* ---- Enable interrupts ----------------------------------------------- */
     __asm__ volatile ("sti");
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     kprintf("\n  Interrupts online.\n");
 
-    /* ---- Keyboard echo loop ---------------------------------------------- */
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("\n  Type something (keyboard echo test):\n  > ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-
-    uint32_t prompt_col, prompt_row;  /* cursor position just after '> ' */
-
-    /* Capture start position once after the initial prompt */
-    prompt_col = vga_get_col();
-    prompt_row = vga_get_row();
-
-    for (;;) {
-        char c = keyboard_getchar();
-        if (c == '\n' || c == '\r') {
-            kprintf("\n  > ");
-            /* Update anchor for the new prompt */
-            prompt_col = vga_get_col();
-            prompt_row = vga_get_row();
-        } else if (c == '\b') {
-            /* Only backspace if cursor is strictly past the input start */
-            if (vga_get_row() > prompt_row ||
-                (vga_get_row() == prompt_row && vga_get_col() > prompt_col)) {
-                vga_backspace();
-            }
-        } else if (c == KEY_LEFT) {
-            /* Would wrap to end of previous row if at col 0 */
-            uint8_t new_col = vga_get_col() > 0 ? vga_get_col() - 1 : VGA_WIDTH - 1;
-            uint8_t new_row = vga_get_col() > 0 ? vga_get_row() : vga_get_row() - 1;
-            if (new_row > (uint8_t)prompt_row ||
-                (new_row == (uint8_t)prompt_row && new_col >= (uint8_t)prompt_col))
-                vga_cursor_left();
-        } else if (c == KEY_RIGHT) {
-            vga_cursor_right();
-        } else if (c == KEY_UP) {
-            /* Moving up is only safe if the row above is still >= prompt_row,
-               and if landing on prompt_row the col must be >= prompt_col */
-            if (vga_get_row() > (uint8_t)prompt_row) {
-                uint8_t new_row = vga_get_row() - 1;
-                if (new_row > (uint8_t)prompt_row ||
-                    (new_row == (uint8_t)prompt_row && vga_get_col() >= (uint8_t)prompt_col))
-                    vga_cursor_up();
-            }
-        } else if (c == KEY_DOWN) {
-            vga_cursor_down();
-        } else {
-            vga_putchar(c);
-        }
+    /* ---- Login + shell loop ---------------------------------------------- */
+    /*
+     * Show the login screen on boot and after every logout.
+     * login_prompt() never returns NULL — it halts on too many failures.
+     */
+    while (1) {
+        const user_t *user = login_prompt();
+        shell_run(user);
     }
 }
