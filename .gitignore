@@ -1,0 +1,30 @@
+# Build outputs
+build/
+*.bin
+*.o
+*.elf
+*.img
+*.iso
+
+# Compiler/linker files
+*.d
+*.map
+*.lst
+
+# Editor/IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS specific
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+temp/
