@@ -24,7 +24,7 @@ KERNEL_BIN="$BUILD_DIR/kernel.bin"
 
 # Disk image
 DISK_IMAGE="$BUILD_DIR/pd-os.img"
-DISK_SIZE=2880   # 2880 * 512 = 1.44 MB floppy
+DISK_SIZE=2880   # 2880 * 512 = 1.44 MB
 
 # Cross-toolchain (i686-linux-gnu provided by gcc-i686-linux-gnu package)
 CROSS_CC="i686-linux-gnu-gcc"

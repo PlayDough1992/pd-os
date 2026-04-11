@@ -160,22 +160,23 @@ stage2_start:
     call print_color_str
 
     ; ------------------------------------------------------------------
-    ; Load kernel from disk   (CHS sector 7 = LBA 6)  to 0x100000
-    ; With A20 enabled, ES=0xFFFF / BX=0x0010 => physical 0xFFFF0+0x10
-    ;                                           = 0x100000
+    ; Load kernel using standard CHS INT 13h (same method Stage 1 uses)
+    ; Target: 0x1000:0x0000 = physical 0x10000 (safe low memory)
+    ; kernel will be copied to 0x100000 in protected mode
+    ; Sector 7 = LBA 6.  12 sectors = 6 KB, stays within track 0.
     ; ------------------------------------------------------------------
     mov  si, msg_kernel_load
     call print_color_str
 
-    mov  ax, 0xFFFF
+    mov  ax, 0x1000
     mov  es, ax
-    mov  bx, 0x0010             ; ES:BX => physical 0x100000
-    mov  ah, 0x02               ; BIOS read sectors
-    mov  al, 64                 ; 64 sectors = 32 KB (plenty for initial kernel)
-    mov  ch, 0                  ; cylinder 0
-    mov  cl, 7                  ; CHS sector 7 = LBA 6
-    mov  dh, 0                  ; head 0
-    mov  dl, [boot_drive]       ; boot drive saved at entry
+    xor  bx, bx             ; ES:BX = 0x1000:0x0000 = physical 0x10000
+    mov  ah, 0x02           ; BIOS: read sectors
+    mov  al, 12             ; 12 sectors = 6 KB
+    mov  ch, 0              ; cylinder 0
+    mov  cl, 7              ; sector 7 = LBA 6
+    mov  dh, 0              ; head 0
+    mov  dl, [boot_drive]
     int  0x13
     jc   .kernel_err
 
@@ -209,7 +210,7 @@ stage2_start:
     jmp  hang
 
 ; ===========================================================================
-;  32-bit protected mode — jump to kernel at 0x100000
+;  32-bit protected mode — copy kernel from 0x10000 to 0x100000, then jump
 ; ===========================================================================
 [BITS 32]
 pm_entry:
@@ -221,9 +222,15 @@ pm_entry:
     mov  ss, ax
     mov  esp, 0x9FC00           ; kernel stack (below BIOS data area)
 
+    ; Copy kernel: 0x10000 -> 0x100000  (12 sectors = 6144 bytes = 1536 dwords)
+    mov  esi, 0x10000
+    mov  edi, 0x100000
+    mov  ecx, 1536
+    rep  movsd
+
     ; Jump to kernel entry point
     mov  eax, 0x100000
-    jmp  eax                    ; transfer control to PD-Kernel
+    jmp  eax
 
 ; ===========================================================================
 ;  Back to 16-bit
@@ -733,6 +740,22 @@ selected    db 0
 countdown   db MENU_TIMEOUT
 cur_attr    db ATTR_NORMAL
 boot_drive  db 0x80            ; BIOS drive number saved at entry
+
+; Disk Address Packet (DAP) for INT 13h Extended Read (AH=0x42)
+align 2
+dap:
+    db  0x10        ; size of DAP = 16 bytes
+    db  0x00        ; reserved
+dap_count:
+    dw  0           ; number of sectors (filled at runtime)
+dap_offset:
+    dw  0           ; transfer buffer offset (filled at runtime)
+dap_segment:
+    dw  0           ; transfer buffer segment (filled at runtime)
+dap_lba_lo:
+    dd  0           ; LBA low 32 bits (filled at runtime)
+dap_lba_hi:
+    dd  0           ; LBA high 32 bits (always 0 for us)
 
 ; Logo - pure ASCII, no backslash art, fits 74 chars
 ;        PD-OS spelled with simple block letters
