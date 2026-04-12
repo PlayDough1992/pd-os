@@ -1,348 +1,215 @@
 # PD-OS Project Status
 
-**Last Updated**: April 11, 2026  
-**Current Phase**: Phase 2 Complete - Bootloader Successfully Booted! 🎉  
+**Last Updated**: April 12, 2026
+**Current Phase**: Phase 9a Complete ✅
 **Version**: 0.1.0
+**Kernel Size**: 59,104 bytes | Zero warnings
 
 ---
 
 ## ✅ Completed Phases
 
-### Phase 1: Environment Setup & Toolchain ✓
-**Status**: Complete  
-**Completion Date**: April 11, 2026
-
-**Deliverables:**
-- ✅ Project directory structure created
-- ✅ Toolchain setup guide ([tools/setup.md](tools/setup.md))
-- ✅ Root Makefile for build automation
-- ✅ Build verification scripts
-
-**Files Created:**
-- `Makefile` - Root build configuration
-- `tools/setup.md` - Toolchain installation guide
-- `tools/create-image.ps1` - PowerShell disk image builder
-- `.gitignore` - Version control exclusions
-
-**Toolchain Status:**
-- ✅ QEMU 10.1.0 - Installed and verified
-- ✅ NASM 2.16.03 - Portable version working perfectly
-- ⏸️ i686-elf-gcc - Deferred to Phase 4 (not needed for bootloader)
-- ✅ Git Bash - Available (includes Make)
-- ✅ PowerShell build scripts - Created and working
-
-**Build System:**
-- ✅ `build.ps1` - PowerShell build script (primary)
-- ✅ `Makefile` - Traditional Make (for Git Bash users)
-- ✅ Portable NASM at `tools-download/nasm/nasm.exe`
-
-**Notes:**
-- Used portable NASM instead of installer to avoid PATH issues
-- PowerShell proved more reliable than Chocolatey for Windows setup
-- Cross-compiler download deferred - only needed for kernel (Phase 4+)
+### Phase 1 — Environment Setup ✓
+- Project directory structure
+- `build.sh` — unified Linux build script
+- `commit.sh` — commits to `linux-build-env` then syncs `main`
+- `.gitignore`, toolchain guide (`tools/setup.md`)
 
 ---
 
-### Phase 2: PD-Bootloader Stage 1 (MBR) ✓
-**Status**: Complete  
-**Completion Date**: April 11, 2026
+### Phase 2 — PD-Bootloader Stage 1 (MBR) ✓
+- 512-byte MBR (`bootloader/stage1.asm`)
+- Loads Stage 2 from LBA 1–5 via BIOS INT 13h
+- Boot signature 0xAA55
 
-**Deliverables:**
-- ✅ 512-byte Master Boot Record bootloader
-- ✅ BIOS interrupt-based text output
-- ✅ Boot signature (0xAA55) implemented
-- ✅ Bootloader documentation
-- ✅ Build system integration
-✅ Initializes CPU segments and stack
-- ✅ Displays welcome messages using BIOS INT 0x10
-- ✅ Proper boot signature for BIOS recognition
-- ✅ **Successfully boots in QEMU!**
-- Ready to load Stage 2 (Phase 3)
+---
 
-**Testing:**
-- ✅ Build tested: Bootloader assembles to exactly 512 bytes
-- ✅ QEMU boot tested: **BOOTLOADER WORKS! Messages display correctly**
-- ✅ Size verification: Confirmed 512 bytes with boot signature
-- ✅ Real boot test: Displays all messages and halts cleanly
+### Phase 3 — PD-Bootloader Stage 2 ✓
+- A20 line enable
+- GDT setup + 32-bit protected mode transition
+- E820 memory map query (passed to kernel via well-known address)
+- INT 13h Extended Read — loads 128 sectors (64 KB) from LBA 6
+- Copies kernel from 0x10000 → 0x100000 (above 1 MB)
+- TUI boot menu with countdown timer and keyboard selection
+- Jumps to kernel entry point
 
-**Actual Boot Output:**
+---
+
+### Phase 4 — Kernel Foundation ✓
+- Kernel entry point (`kernel/arch/x86/entry.asm`)
+- VGA text driver — 80×25 color, hardware cursor, scroll
+- `kprintf` with `%s %u %x %c` format support
+- Kernel panic handler (`PANIC:` halt)
+
+---
+
+### Phase 5 — Interrupts ✓
+- IDT (256 gates, `kernel/arch/x86/idt.asm`)
+- 8259A dual-PIC remapping (IRQs → vectors 0x20–0x2F)
+- PIT at 100 Hz (`pit_get_ticks()`)
+- PS/2 keyboard driver — IRQ1, Set 1 scancodes, shift/caps/backspace
+- Readline with mid-line editing (left/right arrows, Home/End, Delete)
+
+---
+
+### Phase 6 — User System + PD-Shell Tier 1 ✓
+- Login screen with 3-attempt lockout
+- FNV-1a 32-bit password hashing (plaintext zeroed after boot)
+- User table: `root` (uid 0, `USER_FLAG_ROOT`), `pd` (uid 1)
+- PD-Shell: `help`, `clear`, `echo`, `version`, `uptime`, `color`, `whoami`, `logout`, `reboot`, `shutdown`
+
+---
+
+### Phase 7 — Memory Management ✓
+- E820 map parsed at boot
+- Bitmap PMM — 4 KB pages, free/used tracking
+- Kernel-space paging — identity map + MMIO (VGA)
+- Kernel heap — `kmalloc` / `kfree` with split/merge
+- Shell commands: `memmap`, `meminfo`, `heap`
+
+---
+
+### Phase 8 — Storage & Filesystem ✓
+
+#### ATA/IDE Driver (`kernel/drivers/ata.c`)
+- 28-bit LBA PIO, primary channel, master drive, polling
+- Single-sector reads and writes
+- Cache flush (`0xE7`) after every write
+- **Safety guard**: refuses writes to LBA < 200 (protects bootloader/kernel)
+
+#### VFS Layer (`kernel/fs/vfs.c`)
+- Driver registry (up to 8 drivers)
+- Mount table with longest-prefix path dispatch
+- `vfs_open`, `vfs_read`, `vfs_write`, `vfs_create`, `vfs_unlink`, `vfs_readdir`
+
+#### PDFS v2 — Native Filesystem (`kernel/fs/pdfs.c`)
+- **On-disk layout** (base LBA 200):
+  - LBA 200: Superblock (magic, version, dir_lba, next_free_lba…)
+  - LBA 201: Reserved (journal slot, currently unused)
+  - LBA 202–205: Root directory (4 sectors, 32 × 64-byte dirents)
+  - LBA 206+: File and subdir data (contiguous, sector-aligned)
+- 64-byte dirents: name (27 chars), start_lba, size, alloc_sectors, flags, uid, gid, mode, ctime, dir_sectors
+- Subdirectory support — each dir has its own 4-sector table
+- Unix rwxrwxrwx permissions (owner/group uid + mode bits)
+- Monotonic `next_free_lba` allocator
+- `flush_dir_slot` — writes only the single sector containing the changed dirent
+- `pdfs_stat_dir(path, idx, out)` — enumerate any directory
+- Permission context: `pdfs_set_context(caller, elevated)`
+- v1 disks mount read-only; v2 disks read/write
+- Shell commands: `ls`, `cat`, `write`, `rm`, `mkdir`, `mkpdfs`, `setp`, `seto`
+
+#### Read-Only Drivers
+- FAT32 (`kernel/fs/fat32.c`) — mounted at `/mnt/fat` (LBA 2048)
+- ext2 (`kernel/fs/ext2.c`) — mounted at `/mnt/ext2` (LBA 4096)
+- NTFS (`kernel/fs/ntfs.c`) — mounted at `/mnt/ntfs` (LBA 69632)
+
+---
+
+### Phase 9a — PD-Shell Tier 2 ✓
+
+#### CWD & Path Resolution
+- `g_cwd[128]` — session current-working-directory state
+- `normalize_path(input, out)` — canonical resolver:
+  - `~` → `/home/<username>`
+  - `../` — walks up from CWD
+  - `/absolute` — used as-is
+  - `relative` — prepended with CWD
+- `make_path(out, name)` — wraps `normalize_path`; used by all commands
+
+#### New Commands
+| Command | Description |
+|---------|-------------|
+| `sdir [path]` | Change directory (`~`, `..`, `/abs`, `relative`) |
+| `copy <src> <dst>` | Copy a file |
+| `move <src> <dst>` | Move / rename a file |
+| `setp <file> <oct>` | Set permissions (e.g. `setp f.txt 644`) |
+| `seto <file> <u>:<g>` | Set owner (e.g. `seto f.txt pd:pd`) |
+| `elev <cmd>` | Run command with elevated (root) privileges |
+
+#### Prompt
+`username@pd-shell:/cwd> ` — CWD displayed in cyan
+
+---
+
+## 🐛 Notable Bugs Fixed
+
+### MBR Corruption on Any Disk Write — FIXED (April 12, 2026)
+**Root cause**: `sizeof(pdfs_dirent_t)` was 60 bytes (not 64 as intended). `reserved` was `uint32_t` (4B) instead of `uint32_t[2]` (8B). `g_dir[32]` = 1920 bytes. `pdfs_mount` reads 4 sectors (2048 bytes) into it → 128-byte BSS overflow → `g_base_lba` zeroed → every `flush_sb()` wrote the PDFS superblock to LBA 0 (MBR), destroying the boot signature.
+
+**Fix**: `reserved[2]` in `pdfs_dirent_t` (struct now exactly 64B). ATA guard added (refuse writes to LBA < 200).
+
+### Keyboard Dead After Reboot — FIXED (April 12, 2026)
+**Root cause**: PS/2 controller sends 0xAA (BAT completion) byte into output buffer after system reset. `keyboard_init` unmasked IRQ1 without draining the buffer first — stale byte prevented new IRQ1 firings.
+
+**Fix**: Drain PS/2 output buffer (`while (inb(0x64) & 0x01) inb(0x60)`) before `pic_unmask_irq(1)`.
+
+### mkdir Corrupting Disk (Journal Overhead) — FIXED (April 12, 2026)
+**Root cause**: Previous `flush_dir_at` wrote all 4 directory sectors wrapped in a journal (begin + write + commit per sector) = 17 ATA writes to overlapping LBAs per `mkdir`, overwhelming QEMU's ATA emulation.
+
+**Fix**: Removed journal entirely. `flush_dir_slot` writes exactly one sector (the one containing the changed dirent).
+
+---
+
+## 📊 Progress
+
 ```
-PD-Bootloader v0.1 - Stage 1
-Booting PD-OS...
-Loading Stage 2...
-[Phase 2] Halting (Stage 2 not implemented yet)
-```
+Phase 1:  ████████████████████ 100% ✅ Environment & build system
+Phase 2:  ████████████████████ 100% ✅ Bootloader Stage 1 (MBR)
+Phase 3:  ████████████████████ 100% ✅ Bootloader Stage 2 (PM, TUI, E820)
+Phase 4:  ████████████████████ 100% ✅ Kernel foundation (VGA, kprintf)
+Phase 5:  ████████████████████ 100% ✅ IDT, PIC, PIT, keyboard
+Phase 6:  ████████████████████ 100% ✅ User system, PD-Shell Tier 1
+Phase 7:  ████████████████████ 100% ✅ PMM, paging, heap
+Phase 8:  ████████████████████ 100% ✅ ATA, VFS, PDFS v2, FAT32/ext2/NTFS
+Phase 9a: ████████████████████ 100% ✅ Shell Tier 2 (sdir/copy/move/CWD)
+Phase 9b: ░░░░░░░░░░░░░░░░░░░░   0%  ⬜ History, tab completion
+Phase 10: ░░░░░░░░░░░░░░░░░░░░   0%  ⬜ Process management
+GUI:      ░░░░░░░░░░░░░░░░░░░░   0%  ⬜ VESA + desktop (future)
 
-**How to Build and Run:**
-```powershell
-# Simple way
-.\build.ps1 run
-
-# Manual way
-.\tools-download\nasm\nasm.exe -f bin bootloader\stage1.asm -o build\bootloader.bin
-# ... create disk image ...
-qemu-system-i386 -drive format=raw,file=build\pd-os.img -m 128M
-```aiting NASM installation)
-- ⬜ QEMU boot tested: Pending
-- ⬜ Size verification: Pending
-
-**Next Actions:**
-1. Install NASM
-2. Run `make all` to build bootloader
-3. Run `make run` to test in QEMU
-4. Verify boot messages appear
-
----
-
-## 🔄 Current Phase
-
-### Phase 3: PD-Bootloader Stage 2 (Extended Bootloader)
-**Status**: Not Started  
-**Expected Duration**: Week 2-3
-
-**Objectives:**
-- Enable A20 line for extended memory access
-- Set up Global Descriptor Table (GDT)
-- Transition from 16-bit real mode to 32-bit protected mode
-- Detect available system memory
-- Load kernel from disk into memory (0x100000)
-- Jump to kernel entry point
-
-**Pending Files:**
-- `bootloader/stage2.asm` - Extended bootloader
-- `bootloader/gdt.asm` - GDT setup routine
-- `bootloader/a20.asm` - A20 line enabling
-- `bootloader/disk.asm` - Disk I/O routines
-- `bootloader/linker.ld` - Bootloader linker script
-
-**Dependencies:**
-- Phase 2 complete ✓
-- NASM installed (pending)
-
-**Verification Criteria:**
-- CPU successfully enters 32-bit protected mode
-- Memory detection works and values are displayed
-- Kernel loaded at correct memory address (0x100000)
-- Control transfers to kernel entry point without crash
-
----
-
-## ⬜ Upcoming Phases
-
-### Phase 4: PD-Kernel Foundation (Week 4)
-**Status**: Not Started
-
-**Key Components:**
-- Kernel entry point (assembly)
-- VGA text mode driver (80x25 console)
-- Basic I/O functions (putchar, puts, printf)
-- Kernel GDT initialization
-- Panic handler for errors
-
-**Dependencies:**
-- Phase 3 complete
-- i686-elf-gcc installed
-
----
-
-### Phase 5: Interrupt & Exception Handling (Week 5)
-**Status**: Not Started
-
-**Key Components:**
-- Interrupt Descriptor Table (IDT)
-- Exception handlers (divide-by-zero, page fault, etc.)
-- PIC (Programmable Interrupt Controller) setup
-- Timer interrupt (PIT)
-- Keyboard interrupt handler
-
----
-
-### Phase 6: Memory Management (Week 6)
-**Status**: Not Started
-
-**Key Components:**
-- Physical memory allocator
-- Paging structures (page directory + page tables)
-- Virtual memory manager
-- Kernel heap (kmalloc/kfree)
-
----
-
-### Phase 7: Storage & Filesystem (Week 7-8)
-**Status**: Not Started
-
-**Key Components:**
-- ATA PIO disk driver
-- FAT12 or simple custom filesystem
-- VFS layer
-- File operations (open, read, write, close)
-
----
-
-### Phase 8: Process Management (Week 9)
-**Status**: Not Started
-
-**Key Components:**
-- Process Control Blocks (PCB)
-- Context switching
-- Round-robin scheduler
-- User mode vs kernel mode separation
-
----
-
-### Phase 9: CLI Shell (Week 10-11)
-**Status**: Not Started
-
-**Key Components:**
-- Shell main loop
-- Command parser✅ COMPLETE
-Phase 2:  ████████████████████ 100% ✅ COMPLETE - BOOTLOADER BOOTS!
-Phase 3:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 4:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 5:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 6:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 7:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 8:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 9:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 10: ░░░░░░░░░░░░░░░░░░░░   0%
-
-Overall:  ████░░░░░░░░░░░░░░░░  20% - BOOTLOADER WORKING!
-- Error handling improvements
-- Comprehensive documentation
-- Performance testing
-- Bug fixes
-
----
-
-## 📊 Overall Progress
-
-### Implementation Progress
-```
-Phase 1:  ████████████████████ 100% ✓
-Phase 2:  ████████████████████ 100% ✓
-Phase 3:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 4:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 5:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 6:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 7:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 8:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 9:  ░░░░░░░░░░░░░░░░░░░░   0%
-Phase 10: ░░░░░░░░░░░░░░░░░░░░   0%
-
-Overall:  ████░░░░░░░░░░░░░░░░  20%
+Overall:  ████████████████░░░░  80%
 ```
 
-### Components Status
+### Component Status
+
 | Component | Status | Phase |
 |-----------|--------|-------|
-| Project Structure | ✅ Complete | 1 |
-| Build System | ✅ Complete | 1 |
-| Documentation | ✅ Complete | 1-2 |
+| Build system (`build.sh`) | ✅ Complete | 1 |
 | Bootloader Stage 1 | ✅ Complete | 2 |
-| Bootloader Stage 2 | ⬜ Not Started | 3 |
-| Kernel Entry | ⬜ Not Started | 4 |
-| VGA Driver | ⬜ Not Started | 4 |
-| Interrupts/IDT | ⬜ Not Started | 5 |
-| Memory Management | ⬜ Not Started | 6 |
-| Filesystem | ⬜ Not Started | 7 |
-| Process Management | ⬜ Not Started | 8 |
-| CLI Shell | ⬜ Not Started | 9 |
-| GUI | ⬜ Future | Post-CLI |
+| Bootloader Stage 2 | ✅ Complete | 3 |
+| VGA text driver | ✅ Complete | 4 |
+| kprintf / panic | ✅ Complete | 4 |
+| IDT / exceptions | ✅ Complete | 5 |
+| PIC / PIT (100 Hz) | ✅ Complete | 5 |
+| PS/2 keyboard driver | ✅ Complete | 5 |
+| Readline (mid-line edit) | ✅ Complete | 5 |
+| User accounts / login | ✅ Complete | 6 |
+| PD-Shell Tier 1 | ✅ Complete | 6 |
+| E820 memory map | ✅ Complete | 7 |
+| Bitmap PMM | ✅ Complete | 7 |
+| Paging | ✅ Complete | 7 |
+| Kernel heap (kmalloc/kfree) | ✅ Complete | 7 |
+| ATA/IDE PIO driver | ✅ Complete | 8 |
+| VFS layer | ✅ Complete | 8 |
+| PDFS v2 (R/W + permissions) | ✅ Complete | 8 |
+| FAT32 read-only driver | ✅ Complete | 8 |
+| ext2 read-only driver | ✅ Complete | 8 |
+| NTFS read-only driver | ✅ Complete | 8 |
+| PD-Shell Tier 2 (26 cmds) | ✅ Complete | 9a |
+| CWD + normalize_path | ✅ Complete | 9a |
+| copy / move commands | ✅ Complete | 9a |
+| setp / seto (chmod/chown) | ✅ Complete | 9a |
+| Command history (↑/↓) | ⬜ Not started | 9b |
+| Tab completion | ⬜ Not started | 9b |
+| Process management | ⬜ Not started | 10 |
+| GUI / VESA framebuffer | ⬜ Not started | Future |
 
 ---
 
-## 🛠️ Development Environment
+## ⬜ Next Up — Phase 9b
 
-### Installed Tools
-- ✅ QEMU 10.1.0 - System emulator
-- ⬜ NASM - Assembler (required next)
-**Phase 2 Complete - Bootloader Successfully Boots!** 🎉
-
-Ready to begin Phase 3: Bootloader Stage 2
-
-1. **Create Stage 2 bootloader**
-   - File: `bootloader/stage2.asm`
-   - Enable A20 line for >1MB memory access
-   - Set up GDT (Global Descriptor Table)
-
-2. **Implement protected mode transition**
-   - Switch from 16-bit real mode to 32-bit protected mode
-   - Set up segments for kernel execution
-
-3. **Add disk loading**
-   - Modify Stage 1 to load Stage 2 from disk
-   - Implement BIOS INT 13h disk read
-
-4. **Memory detection**
-   - Query available memory using BIOS INT 15h
-   - Pass memory map to kernel
-
-5. **Prepare for kernel**
-   - Load kernel binary to 0x100000 (1MB mark)
-   - Jump to kernel entry point
-
-**Current Achievement:**
-✅ Working bootloader that boots from BIOS
-✅ Complete build system with portable tools
-✅ Successfully tested in QEMU
-✅ Ready for Stage 2 development!
-   - Add to PATH
-   - Verify: `nasm -v`
-
-2. **Install Make** (optional but recommended)
-   - Via Chocolatey: `choco install make`
-   - Or use Git Bash
-   - Verify: `make --version`
-
-3. **Build and Test Phase 2**
-   ```bash
-   make all        # Build bootloader and disk image
-   make run        # Test in QEMU
-   ```
-
-4. **Verify Boot Process**
-   - Should see: "PD-Bootloader v0.1 - Stage 1"
-   - Should see: "Booting PD-OS..."
-   - Should halt with message
-
-5. **Begin Phase 3**
-   - Create `bootloader/stage2.asm`
-   - Implement disk loading in Stage 1
-   - Set up GDT and protected mode transition
-
----- Bootloader Working!  
-**Ready for Phase 3**: ✅ Yes - All dependencies met  
-**Blocking Issues**: None  
-**Timeline**: Ahead of schedule - Phases 1-2 complete Day 1!
-### Created Documentation
-- ✅ `README.md` - Project overview and quick start
-- ✅ `PD-OS-plan.md` - Complete 12-phase implementation plan
-- ✅ `tools/setup.md` - Toolchain installation guide
-- ✅ `bootloader/README.md` - Bootloader technical documentation
-- ✅ `PROJECT_STATUS.md` - This file
-
-### Pending Documentation
-- ⬜ `docs/memory-layout.md` - Memory map documentation
-- ⬜ `docs/build-process.md` - Detailed build process
-- ⬜ `docs/debugging.md` - Debugging guide
-- ⬜ `kernel/README.md` - Kernel documentation
+- **Command history** — ring buffer for previous commands, ↑/↓ arrows to navigate (readline already stubs `KEY_UP`/`KEY_DOWN`)
+- **Tab completion** — enumerate `g_cwd` via `pdfs_stat_dir` while typing, complete on unique prefix
 
 ---
 
-## 🔗 Quick Links
-
-- [Main README](README.md) - Getting started
-- [Implementation Plan](PD-OS-plan.md) - Detailed roadmap
-- [Toolchain Setup](tools/setup.md) - Installation guide
-- [Bootloader Docs](bootloader/README.md) - Technical details
-
----
-
-**Project Health**: ✅ Excellent  
-**Ready for Phase 3**: ⚠️ Awaiting toolchain installation  
-**Blocking Issues**: None  
-**Timeline**: On track for 2-3 month goal
-
----
-
-_This status document is automatically updated as the project progresses._
+_Last updated automatically after each phase completion._
