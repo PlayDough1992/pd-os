@@ -82,6 +82,7 @@ build() {
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/keyboard.c"     -o "$BUILD_DIR/keyboard.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/users.c"           -o "$BUILD_DIR/users.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/login.c"           -o "$BUILD_DIR/login.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/mm/e820.c"              -o "$BUILD_DIR/e820.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/shell.c"            -o "$BUILD_DIR/shell.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/kernel.c"          -o "$BUILD_DIR/kernel_main.o"
 
@@ -99,6 +100,7 @@ build() {
         "$BUILD_DIR/keyboard.o" \
         "$BUILD_DIR/users.o" \
         "$BUILD_DIR/login.o" \
+        "$BUILD_DIR/e820.o" \
         "$BUILD_DIR/shell.o" \
         "$BUILD_DIR/kernel_main.o" \
         -o "$KERNEL_ELF"

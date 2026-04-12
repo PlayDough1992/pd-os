@@ -9,6 +9,7 @@
 #include "keyboard.h"
 #include "pit.h"
 #include "users.h"
+#include "e820.h"
 
 /* ---- Session state -------------------------------------------------------- */
 
@@ -184,6 +185,10 @@ static void cmd_help(int argc, char *argv[])
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Show current user\n");
     vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    memmap           ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Show physical memory map (E820)\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     kprintf("    logout           ");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Log out and return to login screen\n");
@@ -277,6 +282,12 @@ static void cmd_whoami(int argc, char *argv[])
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 }
 
+static void cmd_memmap(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    e820_print();
+}
+
 static void cmd_logout(int argc, char *argv[])
 {
     (void)argc; (void)argv;
@@ -317,7 +328,8 @@ static const command_t commands[] = {
     { "version", cmd_version },
     { "uptime",  cmd_uptime  },
     { "color",   cmd_color   },
-    { "whoami",  cmd_whoami  },
+    { "whoami",   cmd_whoami   },
+    { "memmap",   cmd_memmap   },
     { "logout",   cmd_logout   },
     { "reboot",   cmd_reboot   },
     { "shutdown", cmd_shutdown },

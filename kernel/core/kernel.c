@@ -12,6 +12,7 @@
 #include "users.h"
 #include "login.h"
 #include "shell.h"
+#include "e820.h"
 
 void kernel_main(void)
 {
@@ -61,6 +62,12 @@ void kernel_main(void)
     users_init();
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     kprintf("  (X) COMPLETE\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    kprintf("  (0) Reading memory map...");
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("  (X) %u entr%s\n",
+            e820_count(), e820_count() == 1 ? "y" : "ies");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
     /* ---- Enable interrupts ----------------------------------------------- */
