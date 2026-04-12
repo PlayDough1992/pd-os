@@ -20,6 +20,7 @@
 
 static const user_t *g_session_user = NULL;
 static int           g_logout       = 0;
+static int           g_elevated     = 0;   /* set during an elev sub-command */
 
 /* ---- String helpers (no libc) ------------------------------------------- */
 
@@ -132,6 +133,52 @@ static int readline(char *buf, int len)
     }
 }
 
+/* ---- Password readline (masked) ------------------------------------------ */
+/*
+ * Like readline but echoes '*' for each character.
+ * No cursor movement -- password input is strictly append/backspace.
+ */
+static int readline_masked(char *buf, int len)
+{
+    int     count      = 0;
+    uint8_t anchor_col = vga_get_col();
+    uint8_t anchor_row = vga_get_row();
+
+    sh_memset(buf, 0, len);
+
+    for (;;) {
+        char c = keyboard_getchar();
+
+        if (c == '\n' || c == '\r') {
+            buf[count] = '\0';
+            vga_putchar('\n');
+            return count;
+        }
+
+        if (c == '\b') {
+            if (count > 0) {
+                buf[--count] = '\0';
+                vga_set_cursor(anchor_col, anchor_row);
+                int i;
+                for (i = 0; i < count; i++) vga_putchar('*');
+                vga_putchar(' ');
+                vga_set_cursor(
+                    (uint8_t)((anchor_col + count) % VGA_WIDTH),
+                    (uint8_t)(anchor_row + (anchor_col + count) / VGA_WIDTH));
+            }
+            continue;
+        }
+
+        if (c == KEY_LEFT || c == KEY_RIGHT || c == KEY_UP || c == KEY_DOWN)
+            continue;
+        if (c < 0x20) continue;
+        if (count >= len - 1) continue;
+
+        buf[count++] = c;
+        vga_putchar('*');
+    }
+}
+
 /* ---- Tokenizer ------------------------------------------------------------ */
 
 static int tokenize(char *line, char *argv[], int max_args)
@@ -225,6 +272,10 @@ static void cmd_help(int argc, char *argv[])
     kprintf("    mkpdfs           ");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Format PDFS (erases all files)\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    elev <cmd>       ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Run a command with admin privileges\n");
     vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     kprintf("    logout           ");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
@@ -590,6 +641,8 @@ static void cmd_shutdown(int argc, char *argv[])
     __asm__ volatile ("1: hlt\njmp 1b\n");
 }
 
+static void cmd_elev(int argc, char *argv[]);   /* defined after commands[] */
+
 /* ---- Command table -------------------------------------------------------- */
 
 typedef struct {
@@ -614,11 +667,67 @@ static const command_t commands[] = {
     { "write",    cmd_write    },
     { "rm",       cmd_rm       },
     { "mkpdfs",   cmd_mkpdfs   },
+    { "elev",     cmd_elev     },
     { "logout",   cmd_logout   },
     { "reboot",   cmd_reboot   },
     { "shutdown", cmd_shutdown },
     { NULL,       NULL         }
 };
+
+/* ---- elev: privileged command dispatch ------------------------------------ */
+
+static void cmd_elev(int argc, char *argv[])
+{
+    char pwd[64];
+    int  i, found;
+
+    if (argc < 2) {
+        kprintf("  Usage: elev <command> [args...]\n");
+        return;
+    }
+
+    /* Prevent recursion */
+    if (sh_strcmp(argv[1], "elev") == 0) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  elev: cannot elevate elev\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    /* Root users skip re-authentication */
+    if (!(g_session_user && (g_session_user->flags & USER_FLAG_ROOT))) {
+        vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        kprintf("  [elev] root password: ");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        readline_masked(pwd, sizeof(pwd));
+
+        if (!users_verify("root", pwd)) {
+            sh_memset(pwd, 0, (int)sizeof(pwd));
+            vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            kprintf("  elev: authentication failure\n");
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            return;
+        }
+        sh_memset(pwd, 0, (int)sizeof(pwd));
+    }
+
+    g_elevated = 1;
+    found = 0;
+    for (i = 0; commands[i].name != NULL; i++) {
+        if (sh_strcmp(argv[1], commands[i].name) == 0) {
+            commands[i].fn(argc - 1, argv + 1);
+            found = 1;
+            break;
+        }
+    }
+    g_elevated = 0;
+
+    if (!found) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  elev: unknown command: %s\n", argv[1]);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    }
+}
 
 /* ---- Shell banner --------------------------------------------------------- */
 
