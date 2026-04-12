@@ -1,9 +1,9 @@
 # PD-OS Project Status
 
 **Last Updated**: April 12, 2026
-**Current Phase**: Phase 9b Complete ✅
+**Current Phase**: Phase 10 Complete ✅
 **Version**: 0.1.0
-**Kernel Size**: 68,064 bytes | Zero warnings
+**Kernel Size**: 71,104 bytes | Zero warnings
 
 ---
 
@@ -163,6 +163,42 @@
 
 ---
 
+### Phase 10 — Process Management ✓
+
+#### `kernel/include/process.h` + `kernel/core/process.c`
+- `g_procs[16]` PCB table, `g_current` index, `g_next_pid` counter
+- **`proc_init()`** — registers boot thread as pid 0 (`kernel/shell`, PROC_RUNNING), no stack allocation
+- **`proc_create(name, entry)`** — kmalloc 8 KB stack; builds fake interrupt frame at stack top so `iret` jumps to `entry()`:
+  - Frame (TOS→bottom): ds(0x10), edi..eax(0s), int_no(0x20), err_code(0), eip(entry), cs(0x08), eflags(0x202)
+- **`sched_irq(current_esp)`** — ACKs PIC, calls `pit_handler()`, saves ESP, decrements quantum; on expiry does round-robin search for next RUNNABLE/RUNNING, returns new ESP
+- **`proc_kill(pid)`** — marks DEAD; pid 0 protected
+- **`proc_get_slot(idx)`** — raw PCB pointer for `ps` command
+- Each process gets `PROC_QUANTUM = 10` ticks before a forced context switch
+
+#### `kernel/arch/x86/sched_entry.asm`
+- Dedicated `irq0_preempt` ISR stub (not routed through `isr_common`)
+- On entry: pushes dummy err_code + int_no, `pusha`, saves DS
+- Calls `sched_irq(esp)` → returns new ESP (same task = no switch, different = context switched)
+- Restores DS, `popa`, skips int_no+err_code, `iret`
+
+#### `kernel/arch/x86/idt.c`
+- IRQ0 gate updated from `irq0` to `irq0_preempt`
+
+#### `kernel/arch/x86/exceptions.c`
+- `IRQ_TIMER` case removed (timer handled inside `sched_irq`)
+
+#### `kernel/core/kernel.c`
+- `static void idle_task(void) { for(;;) __asm__("hlt"); }` — standard idle task
+- After `sti`: `proc_init()` + `proc_create("idle", idle_task)`
+- Banner updated to Phase 10
+
+#### `kernel/core/shell.c`
+- `ps_pad(str, width)` / `ps_pad_uint(v, width)` — manual column padding (kprintf has no `%-Ns`)
+- **`cmd_ps()`** — iterates PCB table, colors RUNNING=green / DEAD=dark-grey / else white; columns: PID(4), STATE(11), TICKS(9), NAME
+- **`cmd_kill()`** — manual atoi, calls `proc_kill(pid)`
+
+---
+
 
 ### Kernel Overflowed 64KB Bootloader Load Limit — FIXED (April 12, 2026)
 **Root cause**: Kernel grew to 68,064 bytes but stage2 only loaded 128 sectors (65,536 bytes) from disk. The last ~2.5 KB was never read, so late `.data`/`.bss` sections contained garbage. Login system failed.
@@ -199,10 +235,11 @@ Phase 7:  ████████████████████ 100% ✅ 
 Phase 8:  ████████████████████ 100% ✅ ATA, VFS, PDFS v2, FAT32/ext2/NTFS
 Phase 9a: ████████████████████ 100% ✅ Shell Tier 2 (sdir/copy/move/CWD)
 Phase 9b: ████████████████████ 100% ✅ History, tab completion, suggestion menu
-Phase 10: ░░░░░░░░░░░░░░░░░░░░   0%  ⬜ Process management
+Phase 10: ████████████████████ 100% ✅ Process management (PCB, scheduler, ps/kill)
+Phase 11: ░░░░░░░░░░░░░░░░░░░░   0%  ⬜ VFS population, /etc/passwd, useradd/userdel
 GUI:      ░░░░░░░░░░░░░░░░░░░░   0%  ⬜ VESA + desktop (future)
 
-Overall:  █████████████████░░░  85%
+Overall:  ██████████████████░░  90%
 ```
 
 ### Component Status
@@ -238,18 +275,19 @@ Overall:  █████████████████░░░  85%
 | CWD + normalize_path | ✅ Complete | 9a |
 | copy / move commands | ✅ Complete | 9a |
 | setp / seto (chmod/chown) | ✅ Complete | 9a |
-| Process management | ⬜ Not started | 10 |
+| Process management (PCB, scheduler) | ✅ Complete | 10 |
+| `ps` / `kill` shell commands | ✅ Complete | 10 |
+| IRQ0 preemptive context switching | ✅ Complete | 10 |
 | GUI / VESA framebuffer | ⬜ Not started | Future |
 
 ---
 
-## ⬜ Next Up — Phase 10
+## ⬜ Next Up — Phase 11
 
-- **Process Control Block (PCB)** — pid, state, register save area, stack pointer, page directory
-- **Context switch** — assembly `task_switch()` saves/restores GPRs + EFLAGS + ESP
-- **Round-robin scheduler** — PIT IRQ triggers preemption
-- **Shell commands** — `ps` (list processes), `kill <pid>`
-- **Ring 3 separation** — TSS, `int 0x80` syscall gate (future)
+- **VFS population** — auto-create `/home/<username>` on first login, `/etc/pd-os/version`, `/pdsys/`, `/pdapps/` skeleton dirs
+- **`/etc/passwd`** — move user table off the hard-coded array to a PDFS file
+- **`useradd` / `userdel`** shell commands
+- **`whoami` + `id`** improvements (read from `/etc/passwd`)
 
 ---
 

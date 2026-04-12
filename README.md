@@ -9,7 +9,8 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 - ⚙️ **Custom Bootloader** — No GRUB, we built our own (PD-Bootloader v0.1)
 - 🔧 **Custom Kernel** — Not the Linux kernel, not any existing kernel (PD-Kernel)
 - 🗄️ **Custom Filesystem** — PDFS v2, a native persistent filesystem with subdirs and Unix permissions
-- 💻 **Custom CLI** — PD-Shell with 27 built-in commands, command history, tab completion, live suggestion menu, and multi-user support
+- 💻 **Custom CLI** — PD-Shell with 29 built-in commands, command history, tab completion, live suggestion menu, and multi-user support
+- ⚡ **Preemptive Multitasking** — Round-robin scheduler, per-process PCB table, IRQ0 context switching, idle task
 - 🤝 **Community Driven** — Like Linux in spirit, but completely independent in code
 
 **We are hoping the dev communities will reach out to help with this project!** This is an ambitious undertaking to create a truly new operating system from scratch. All contributions, ideas, and collaboration are welcome.
@@ -57,14 +58,14 @@ Typing a prefix instantly shows a live context menu of matching commands. Use �
 - ✅ Full CLI shell (PD-Shell) with 27 commands and CWD navigation
 - ✅ Command history (↑/↓ navigation, 32-entry ring buffer)
 - ✅ Tab completion (commands + filesystem) and live autocomplete suggestion menu
-- ⬜ Process management and multitasking
+- ✅ Process management — PCB table, round-robin scheduler, IRQ0 preemption, `ps`/`kill`
 - ⬜ Graphical desktop environment (future)
 
 ---
 
 ## 📋 Current Status
 
-**Phase 9b — Shell Quality-of-Life: COMPLETE ✓**
+**Phase 10 — Process Management: COMPLETE ✓**
 
 ### Completed
 - ✅ Project directory structure and build system (`build.sh`)
@@ -85,6 +86,9 @@ Typing a prefix instantly shows a live context menu of matching commands. Use �
 - ✅ Read-only filesystem drivers: FAT32, ext2, NTFS
 - ✅ PD-Shell with 26 built-in commands, CWD state, color prompt
 - ✅ ATA reserved-sector guard (refuses writes to LBA < 200)
+- ✅ Process management — PCB table (16 slots), round-robin scheduler, IRQ0 preemptive context switching
+- ✅ Dedicated `irq0_preempt` ASM stub — saves/restores full interrupt frame, performs ESP-level task switch
+- ✅ `idle` task (HLT loop) created at boot; boot thread registered as pid 0 (`kernel/shell`)
 
 ### Default User Accounts
 
@@ -126,6 +130,8 @@ Typing a prefix instantly shows a live context menu of matching commands. Use �
 | `logout` | Log out and return to the login screen |
 | `reboot` | Reboot the system |
 | `shutdown` | Shut the system down completely |
+| `ps` | List all processes (PID, state, ticks, name) |
+| `kill <pid>` | Terminate a process by PID |
 
 ---
 
@@ -169,9 +175,11 @@ pd-os/
 ├── kernel/
 │   ├── arch/x86/
 │   │   ├── entry.asm       # Kernel entry point, stack setup
-│   │   └── idt.asm         # IDT load (lidt)
+│   │   ├── idt.asm         # IDT load (lidt)
+│   │   └── sched_entry.asm # IRQ0 preemption stub (irq0_preempt)
 │   ├── core/
 │   │   ├── kernel.c        # Kernel main — init sequence
+│   │   ├── process.c       # PCB table, scheduler, proc_create/kill
 │   │   └── shell.c         # PD-Shell — readline, commands, CWD
 │   ├── drivers/
 │   │   ├── ata.c           # ATA/IDE PIO driver (28-bit LBA)
@@ -248,8 +256,16 @@ E820 memory map parsing, bitmap PMM (4 KB pages), kernel-space paging (identity 
 - ✅ Input buffer expanded from 256 → 512 bytes
 - ✅ Scroll anchor tracking — readline anchor stays correct after forced scrolls
 
-### Phase 10 — Next
-- ⬜ Process management (PCBs, context switching, scheduler, ring 3)
+### Phase 10 — Process Management ✅
+- ✅ `process.h` / `process.c` — PCB table (16 slots), `proc_create`, `proc_kill`, `sched_irq` round-robin
+- ✅ `sched_entry.asm` — dedicated `irq0_preempt` stub; saves full interrupt frame, switches ESP on context change
+- ✅ `idt.c` — IRQ0 gate updated to `irq0_preempt`
+- ✅ `kernel.c` — `proc_init()` + `idle_task` (HLT loop) at boot; banner updated
+- ✅ Shell commands: `ps` (list all processes) and `kill <pid>`
+
+### Phase 11 — Next
+- ⬜ VFS population — `/home/<user>`, `/etc/pd-os/version`, `/pdsys/`, `/pdapps/` skeleton
+- ⬜ Move user table to `/etc/passwd`; add `useradd`/`userdel` commands
 
 ### Future
 - ⬜ GUI / VESA framebuffer graphics
