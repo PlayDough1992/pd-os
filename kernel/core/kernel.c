@@ -14,6 +14,7 @@
 #include "shell.h"
 #include "e820.h"
 #include "pmm.h"
+#include "paging.h"
 
 void kernel_main(void)
 {
@@ -76,6 +77,12 @@ void kernel_main(void)
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     kprintf("  (X) %u MB free\n",
             (pmm_free_frames() * PMM_PAGE_SIZE) / (1024u * 1024u));
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    kprintf("  (0) Enabling paging...");
+    paging_init();
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("  (X) Identity-mapped 4 MB\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
     /* ---- Enable interrupts ----------------------------------------------- */
