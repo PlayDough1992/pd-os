@@ -17,6 +17,8 @@
 #include "paging.h"
 #include "kheap.h"
 #include "ata.h"
+#include "vfs.h"
+#include "pdfs.h"
 
 void kernel_main(void)
 {
@@ -106,6 +108,23 @@ void kernel_main(void)
         } else {
             vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
             kprintf("  (!) No ATA drive detected\n");
+        }
+    }
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    kprintf("  (0) Mounting filesystem...");
+    vfs_init();
+    vfs_register(pdfs_get_driver());
+    {
+        int mret = vfs_mount("/", "pdfs", 69);
+        if (mret == 0) {
+            vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            kprintf("  (X) PDFS at / (%u KB free, %u files)\n",
+                    pdfs_free_sectors() / 2u,
+                    pdfs_file_count());
+        } else {
+            vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+            kprintf("  (!) PDFS not found  (run 'mkpdfs')\n");
         }
     }
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);

@@ -87,6 +87,8 @@ build() {
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/mm/pmm.c"               -o "$BUILD_DIR/pmm.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/mm/paging.c"            -o "$BUILD_DIR/paging.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/mm/kheap.c"             -o "$BUILD_DIR/kheap.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/vfs.c"               -o "$BUILD_DIR/vfs.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/pdfs.c"              -o "$BUILD_DIR/pdfs.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/shell.c"            -o "$BUILD_DIR/shell.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/kernel.c"          -o "$BUILD_DIR/kernel_main.o"
 
@@ -109,6 +111,8 @@ build() {
         "$BUILD_DIR/pmm.o" \
         "$BUILD_DIR/paging.o" \
         "$BUILD_DIR/kheap.o" \
+        "$BUILD_DIR/vfs.o" \
+        "$BUILD_DIR/pdfs.o" \
         "$BUILD_DIR/shell.o" \
         "$BUILD_DIR/kernel_main.o" \
         -o "$KERNEL_ELF"
@@ -124,6 +128,19 @@ build() {
     dd if="$STAGE2_BIN"      of="$DISK_IMAGE" conv=notrunc bs=512 seek=1          2>/dev/null
     dd if="$KERNEL_BIN"      of="$DISK_IMAGE" conv=notrunc bs=512 seek=6          2>/dev/null
     echo -e "${GREEN}  [OK] Disk image: $DISK_IMAGE${NC}"
+
+    # --- PDFS init at LBA 69 ---
+    # Superblock (512 bytes): magic=PDFS, version=1, dir_lba=70, dir_sectors=2,
+    #                         data_lba=72, next_free_lba=72, then zeros to 512
+    # Directory (1024 bytes): 32 zeroed 32-byte dirents (all free)
+    echo -e "${CYAN}  [6] Initialising PDFS at LBA 69...${NC}"
+    python3 -c "
+import struct, sys
+sb = struct.pack('<IIIIII', 0x50444653, 1, 70, 2, 72, 72)
+sb += b'\x00' * (512 - len(sb))
+sys.stdout.buffer.write(sb + b'\x00' * 1024)
+" | dd of="$DISK_IMAGE" conv=notrunc bs=512 seek=69 2>/dev/null
+    echo -e "${GREEN}  [OK] PDFS ready  (LBA 69-71, data from LBA 72)${NC}"
 }
 
 case "$TARGET" in

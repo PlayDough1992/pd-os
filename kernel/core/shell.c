@@ -13,6 +13,8 @@
 #include "pmm.h"
 #include "kheap.h"
 #include "ata.h"
+#include "vfs.h"
+#include "pdfs.h"
 
 /* ---- Session state -------------------------------------------------------- */
 
@@ -204,6 +206,26 @@ static void cmd_help(int argc, char *argv[])
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Show ATA drive info and layout\n");
     vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    ls               ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("List files on PDFS\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    cat <file>       ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Print file contents\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    write <f> <text> ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Create/overwrite a file\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    rm <file>        ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Delete a file\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    mkpdfs           ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Format PDFS (erases all files)\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     kprintf("    logout           ");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Log out and return to login screen\n");
@@ -363,6 +385,169 @@ static void cmd_diskinfo(int argc, char *argv[])
     kprintf("    LBA  69+       Available (filesystem)\n\n");
 }
 
+/* ---- Filesystem helpers --------------------------------------------------- */
+
+/* Build an absolute path from a bare filename: "foo.txt" -> "/foo.txt" */
+static void make_path(char *out, const char *name)
+{
+    int i;
+    out[0] = '/';
+    for (i = 0; i < 62 && name[i]; i++) out[i + 1] = name[i];
+    out[i + 1] = '\0';
+}
+
+/* Print s padded to `width` spaces (no libc needed). */
+static void sh_pad(const char *s, int width)
+{
+    int len = 0;
+    while (s[len]) { vga_putchar(s[len]); len++; }
+    while (len < width) { vga_putchar(' '); len++; }
+}
+
+/* ---- FS commands ---------------------------------------------------------- */
+
+static void cmd_ls(int argc, char *argv[])
+{
+    vfs_node_t node;
+    uint32_t   count = 0;
+    (void)argc; (void)argv;
+
+    vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+    kprintf("\n  PDFS  /  (%u KB free)\n", pdfs_free_sectors() / 2u);
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("  %-16s  %s\n", "Name", "Size");
+    kprintf("  ----------------  --------\n");
+
+    for (;;) {
+        if (vfs_readdir("/", count, &node) != 0) break;
+        vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        sh_pad(node.name, 16);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        kprintf("  %u bytes\n", node.size);
+        count++;
+    }
+
+    if (count == 0) {
+        vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        kprintf("  (empty)\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    } else {
+        kprintf("  %u file%s\n", count, count == 1 ? "" : "s");
+    }
+    kprintf("\n");
+}
+
+static void cmd_cat(int argc, char *argv[])
+{
+    vfs_node_t node;
+    char path[64];
+    char *buf;
+    int   r, i;
+
+    if (argc < 2) { kprintf("  Usage: cat <file>\n"); return; }
+
+    make_path(path, argv[1]);
+    if (vfs_open(path, &node) != 0) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  cat: '%s': file not found\n", argv[1]);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    if (node.size == 0) { kprintf("  (empty file)\n"); return; }
+
+    /* Read up to 4 KB */
+    {
+        uint32_t to_read = node.size > 4096u ? 4096u : node.size;
+        buf = (char *)kmalloc(to_read + 1u);
+        if (!buf) { kprintf("  cat: out of memory\n"); return; }
+
+        r = vfs_read(&node, 0, to_read, buf);
+        if (r < 0) {
+            kprintf("  cat: read error\n");
+            kfree(buf);
+            return;
+        }
+        buf[r] = '\0';
+        kprintf("\n");
+        for (i = 0; i < r; i++) vga_putchar(buf[i]);
+        kprintf("\n");
+        if (node.size > 4096u)
+            kprintf("  ... (truncated at 4096 bytes)\n");
+        kfree(buf);
+    }
+}
+
+static void cmd_write(int argc, char *argv[])
+{
+    vfs_node_t node;
+    char path[64];
+    char content[256];
+    uint32_t clen = 0;
+    int i;
+
+    if (argc < 2) { kprintf("  Usage: write <file> [text]\n"); return; }
+
+    make_path(path, argv[1]);
+
+    /* Assemble content from remaining args */
+    for (i = 2; i < argc; i++) {
+        char *w = argv[i];
+        while (*w && clen < 253u) content[clen++] = *w++;
+        if (i < argc - 1 && clen < 253u) content[clen++] = ' ';
+    }
+    content[clen++] = '\n';
+    content[clen]   = '\0';
+
+    /* Open or create */
+    if (vfs_open(path, &node) != 0) {
+        if (vfs_create(path) != 0) {
+            vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            kprintf("  write: cannot create '%s'\n", argv[1]);
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            return;
+        }
+        vfs_open(path, &node);
+    }
+
+    if (vfs_write(&node, 0, clen, content) < 0) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  write: failed\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    } else {
+        kprintf("  Wrote %u bytes to '%s'\n", clen, argv[1]);
+    }
+}
+
+static void cmd_rm(int argc, char *argv[])
+{
+    char path[64];
+    if (argc < 2) { kprintf("  Usage: rm <file>\n"); return; }
+    make_path(path, argv[1]);
+    if (vfs_unlink(path) == 0)
+        kprintf("  Removed '%s'\n", argv[1]);
+    else {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  rm: '%s': file not found\n", argv[1]);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    }
+}
+
+static void cmd_mkpdfs(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    kprintf("  Formatting PDFS at LBA 69... ");
+    if (pdfs_format(69) != 0) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("FAILED\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("done\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("  PDFS reformatted. All files erased.\n");
+}
+
 static void cmd_logout(int argc, char *argv[])
 {
     (void)argc; (void)argv;
@@ -408,6 +593,11 @@ static const command_t commands[] = {
     { "meminfo",  cmd_meminfo  },
     { "heap",     cmd_heap     },
     { "diskinfo", cmd_diskinfo },
+    { "ls",       cmd_ls       },
+    { "cat",      cmd_cat      },
+    { "write",    cmd_write    },
+    { "rm",       cmd_rm       },
+    { "mkpdfs",   cmd_mkpdfs   },
     { "logout",   cmd_logout   },
     { "reboot",   cmd_reboot   },
     { "shutdown", cmd_shutdown },
