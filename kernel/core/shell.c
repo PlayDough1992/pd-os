@@ -415,11 +415,14 @@ static void cmd_ls(int argc, char *argv[])
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     kprintf("\n  PDFS  /  (%u KB free)\n", pdfs_free_sectors() / 2u);
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("  %-16s  %s\n", "Name", "Size");
+    kprintf("  ");
+    sh_pad("Name", 16);
+    kprintf("  Size\n");
     kprintf("  ----------------  --------\n");
 
     for (;;) {
         if (vfs_readdir("/", count, &node) != 0) break;
+        kprintf("  ");
         vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
         sh_pad(node.name, 16);
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
