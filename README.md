@@ -6,10 +6,11 @@
 
 PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is a completely custom operating system built from the ground up.
 
-- ⚙️ **Custom Bootloader** - No GRUB, we built our own (PD-Bootloader)
-- 🔧 **Custom Kernel** - Not the Linux kernel, not any existing kernel (PD-Kernel)
-- 💻 **Custom CLI & GUI** - No Linux desktop environments, everything is original
-- 🤝 **Community Driven** - Like Linux in spirit, but completely independent in code
+- ⚙️ **Custom Bootloader** — No GRUB, we built our own (PD-Bootloader v0.1)
+- 🔧 **Custom Kernel** — Not the Linux kernel, not any existing kernel (PD-Kernel)
+- 🗄️ **Custom Filesystem** — PDFS v2, a native persistent filesystem with subdirs and Unix permissions
+- 💻 **Custom CLI** — PD-Shell with 26 built-in commands, CWD tracking, and multi-user support
+- 🤝 **Community Driven** — Like Linux in spirit, but completely independent in code
 
 **We are hoping the dev communities will reach out to help with this project!** This is an ambitious undertaking to create a truly new operating system from scratch. All contributions, ideas, and collaboration are welcome.
 
@@ -26,32 +27,49 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 ### PD-Shell with Built-in Commands
 ![PD-Shell](docs/screenshots/03-shell.png)
 
+### PDFS v2 — Persistent Filesystem
+![PDFS Persistence](docs/screenshots/phase8b-pdfs-persistence.png)
+
 ---
 
 ## 🎯 Project Goals
 
 - ✅ Custom bootloader (no GRUB dependency)
-- ✅ 32-bit x86 kernel
-- ✅ User account system (login, passwords, uid)
-- ✅ Command-line interface (PD-Shell Tier 1)
+- ✅ 32-bit x86 protected-mode kernel
+- ✅ Physical memory manager, paging, kernel heap
+- ✅ User account system (login, passwords, uid, root)
+- ✅ ATA/IDE disk driver + Virtual Filesystem Switch (VFS)
+- ✅ Native persistent filesystem (PDFS v2) with subdirs & Unix permissions
+- ✅ Read-only drivers for FAT32, ext2, NTFS
+- ✅ Full CLI shell (PD-Shell) with 26 commands and CWD navigation
 - ⬜ Process management and multitasking
-- ⬜ Filesystem support
 - ⬜ Graphical desktop environment (future)
 
 ---
 
 ## 📋 Current Status
 
-**Phase 6 - PD-Shell + User System: COMPLETE ✓**
+**Phase 9a — PD-Shell Tier 2 + PDFS v2: COMPLETE ✓**
 
 ### Completed
-- ✅ Project directory structure and build system
+- ✅ Project directory structure and build system (`build.sh`)
 - ✅ PD-Bootloader Stage 1 (512-byte MBR)
-- ✅ PD-Bootloader Stage 2 (A20, GDT, protected mode, kernel loader with TUI)
-- ✅ PD-Kernel foundation (VGA text driver, kprintf, panic)
-- ✅ IDT, PIC, PIT (100 Hz), keyboard driver (full scancode Set 1)
-- ✅ PD-Shell Tier 1 (readline, built-in commands, color prompt)
-- ✅ User account system (login screen, FNV-1a password hashing, uid/flags)
+- ✅ PD-Bootloader Stage 2 (A20, GDT, E820 memory map, protected mode, TUI boot menu)
+- ✅ PD-Kernel foundation (VGA text driver, kprintf, kernel panic)
+- ✅ IDT, PIC, PIT (100 Hz), keyboard driver (PS/2 Set 1, IRQ1)
+- ✅ E820 physical memory map, bitmap PMM, 4 KB paging, kernel heap (kmalloc/kfree)
+- ✅ User account system (FNV-1a hashed passwords, uid/gid, root flag, 3-attempt lockout)
+- ✅ ATA/IDE PIO driver (28-bit LBA, primary channel, single-sector reads/writes)
+- ✅ VFS layer (driver registry, mount table, path dispatch)
+- ✅ PDFS v2 — native persistent filesystem:
+  - 64-byte dirents, 32 entries × 4-sector root dir
+  - Subdirectories with independent dir tables
+  - Unix rwxrwxrwx permissions (owner/group uid + mode bits)
+  - Monotonic sector allocator (`next_free_lba`)
+  - Single-sector targeted flushes (no journaling overhead)
+- ✅ Read-only filesystem drivers: FAT32, ext2, NTFS
+- ✅ PD-Shell with 26 built-in commands, CWD state, color prompt
+- ✅ ATA reserved-sector guard (refuses writes to LBA < 200)
 
 ### Default User Accounts
 
@@ -62,76 +80,63 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 
 > Passwords are hashed with FNV-1a 32-bit at boot. Plaintext is zeroed from memory immediately after hashing.
 
-### Shell Built-in Commands
+### PD-Shell Commands
 
 | Command | Description |
 |---------|-------------|
 | `help` | Show all commands |
 | `clear` | Clear the screen |
-| `echo [text]` | Print text |
-| `version` | Show kernel/shell version |
-| `uptime` | Show uptime in seconds |
-| `color [fg] [bg]` | Set text color (0-15) |
+| `echo [text]` | Print text to the terminal |
+| `version` | Show kernel and shell version |
+| `uptime` | Show system uptime in seconds |
+| `color <fg> <bg>` | Set terminal text colors (0–15) |
 | `whoami` | Show current user and uid |
-| `logout` | Log out → return to login screen |
+| `memmap` | Display E820 physical memory map |
+| `meminfo` | Show PMM free/used page counts |
+| `heap` | Show kernel heap usage |
+| `diskinfo` | Show ATA drive model and sector count |
+| `ls [path]` | List directory contents (defaults to CWD) |
+| `cat <file>` | Print file contents |
+| `write <file> [text]` | Create or overwrite a file |
+| `rm <file>` | Delete a file |
+| `mkdir <dir>` | Create a directory |
+| `mkpdfs` | Format the PDFS volume (destructive) |
+| `sdir [path]` | Change directory (`~`, `..`, absolute, relative) |
+| `copy <src> <dst>` | Copy a file |
+| `move <src> <dst>` | Move / rename a file |
+| `setp <file> <octal>` | Set file permissions (e.g. `setp f.txt 644`) |
+| `seto <file> <u>:<g>` | Set file owner (e.g. `seto f.txt pd:pd`) |
+| `elev <command>` | Run a command with elevated (root) privileges |
+| `logout` | Log out and return to the login screen |
 | `reboot` | Reboot the system |
 | `shutdown` | Shut the system down completely |
-
-### Next Steps (Phase 7)
-- ⬜ Physical memory manager (bitmap allocator)
-- ⬜ Paging / virtual memory
-- ⬜ Kernel heap (kmalloc/kfree)
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Install Required Tools
+### Requirements
 
-**Required toolchain:**
-- NASM (assembler)
-- i686-elf-gcc (cross-compiler)
-- QEMU (emulator) ✓ Already installed
-- Make (build system)
+- `nasm` (assembler)
+- `i686-linux-gnu-gcc` (cross-compiler — Linux hosted, 32-bit target)
+- `qemu-system-i386` (emulator)
+- `python3` (used by build.sh for PDFS/FAT/ext2/NTFS image init)
 
-**📖 See detailed installation instructions:** [tools/setup.md](tools/setup.md)
-
-**Quick setup verification:**
-```bash
-# Check what's installed
-make setup-check
-# or
-./build.sh setup-check
-```
-
-### 2. Build the Bootloader
-
-Once toolchain is installed:
+### Build & Run
 
 ```bash
-# Build everything
-make all
+# Build everything (bootloader, kernel, disk image, all filesystems)
+bash build.sh
 
-# Or build just the bootloader
-make bootloader
+# Run in QEMU
+qemu-system-i386 -drive format=raw,file=build/pd-os.img -m 128M -display sdl
 ```
 
-### 3. Run in QEMU
+### Default Login Credentials
 
-```bash
-# Boot PD-OS in emulator
-make run
-
-# Run with debugging output
-make run-debug
 ```
-
-**Expected output:**
-```
-PD-Bootloader v0.1 - Stage 1
-Booting PD-OS...
-Loading Stage 2...
-[Phase 2] Halting (Stage 2 not implemented yet)
+Username: pd   Password: pd
+Username: root Password: root
 ```
 
 ---
@@ -139,244 +144,152 @@ Loading Stage 2...
 ## 📁 Project Structure
 
 ```
-Custom-Bootloader-Kernel-CLI-GUI/
+pd-os/
 │
-├── bootloader/              # PD-Bootloader source code
-│   ├── stage1.asm          # ✅ MBR bootloader (512 bytes)
-│   ├── stage2.asm          # ⬜ Extended bootloader (Phase 3)
-│   ├── gdt.asm             # ⬜ Global Descriptor Table setup
-│   ├── a20.asm             # ⬜ A20 line enabling
-│   └── README.md           # Bootloader documentation
+├── bootloader/
+│   ├── stage1.asm          # 512-byte MBR bootloader
+│   └── stage2.asm          # Extended bootloader (A20, GDT, E820, TUI, PM)
 │
-├── kernel/                  # PD-Kernel source code
-│   ├── arch/x86/           # x86-specific code
-│   ├── core/               # Kernel core (Phase 4+)
-│   ├── drivers/            # Device drivers (Phase 5+)
-│   ├── mm/                 # Memory management (Phase 6)
-│   ├── fs/                 # Filesystem (Phase 7)
-│   ├── process/            # Process management (Phase 8)
-│   ├── shell/              # CLI shell (Phase 9)
-│   ├── include/            # Header files
-│   └── libc/               # Minimal C library
-│
-├── tools/                   # Build tools and scripts
-│   ├── setup.md            # ✅ Toolchain installation guide (Linux)
-│   ├── autosetup.sh        # ✅ Automated setup script
-│   ├── create-image.sh     # ✅ Disk image builder
-│   ├── simple-setup.sh     # ✅ Interactive step-by-step setup
-│   └── quick-setup.sh      # ✅ Quick toolchain status checker
+├── kernel/
+│   ├── arch/x86/
+│   │   ├── entry.asm       # Kernel entry point, stack setup
+│   │   └── idt.asm         # IDT load (lidt)
+│   ├── core/
+│   │   ├── kernel.c        # Kernel main — init sequence
+│   │   └── shell.c         # PD-Shell — readline, commands, CWD
+│   ├── drivers/
+│   │   ├── ata.c           # ATA/IDE PIO driver (28-bit LBA)
+│   │   ├── keyboard.c      # PS/2 keyboard driver (IRQ1, Set 1)
+│   │   ├── pic.c           # 8259A PIC driver
+│   │   ├── pit.c           # 8253/8254 PIT (100 Hz)
+│   │   └── vga.c           # VGA text mode driver (80×25, color)
+│   ├── fs/
+│   │   ├── vfs.c           # Virtual Filesystem Switch (mount table)
+│   │   ├── pdfs.c          # PDFS v2 — native R/W filesystem
+│   │   ├── fat32.c         # FAT32 read-only driver
+│   │   ├── ext2.c          # ext2 read-only driver
+│   │   └── ntfs.c          # NTFS read-only driver
+│   ├── mm/
+│   │   ├── pmm.c           # Physical memory manager (bitmap)
+│   │   ├── paging.c        # 4 KB paging, kernel page tables
+│   │   └── kheap.c         # Kernel heap (kmalloc / kfree)
+│   └── include/            # Header files
 │
 ├── build/                   # Build output (generated)
-│   ├── bootloader.bin      # Compiled bootloader
-│   ├── kernel.bin          # Compiled kernel (Phase 4+)
-│   └── pd-os.img           # Bootable disk image
+│   ├── bootloader.bin
+│   ├── kernel.bin
+│   └── pd-os.img           # Bootable raw disk image (64 MB)
 │
-├── docs/                    # Documentation
-│
-├── Makefile                 # ✅ Root build configuration
-├── PD-OS-plan.md           # ✅ Complete implementation plan
-└── README.md               # This file
+├── build.sh                 # Primary build script
+├── commit.sh                # Commit to linux-build-env + sync main
+├── PD-OS-plan.md            # Original implementation plan
+└── PROJECT_STATUS.md        # Phase-by-phase status log
 ```
-
----
-
-## 🛠️ Build System
-
-### Make Targets
-
-```bash
-make all          # Build complete OS (bootloader + kernel + disk image)
-make bootloader   # Build only bootloader
-make kernel       # Build only kernel (Phase 4+)
-make run          # Build and run in QEMU
-make run-debug    # Run in QEMU with debugging
-make clean        # Remove all build artifacts
-make setup-check  # Verify toolchain installation
-make help         # Show all available targets
-```
-
-### Manual Build Process
-
-If Make is not available:
-
-```bash
-# 1. Assemble bootloader
-nasm -f bin bootloader/stage1.asm -o build/bootloader.bin
-
-# 2. Verify size (must be exactly 512 bytes)
-wc -c < build/bootloader.bin
-
-# 3. Create disk image
-./tools/create-image.sh
-
-# 4. Run in QEMU
-qemu-system-i386 -drive format=raw,file=build/pd-os.img -m 128M
-```
-
-Or simply:
-```bash
-./build.sh run
-```
-
----
-
-## 📚 Documentation
-
-- **[PD-OS-plan.md](PD-OS-plan.md)** - Complete 12-phase implementation plan
-- **[tools/setup.md](tools/setup.md)** - Toolchain setup guide
-- **[bootloader/README.md](bootloader/README.md)** - Bootloader technical docs
 
 ---
 
 ## 🗺️ Development Roadmap
 
-### Phase 1: Environment Setup ✅ COMPLETE
-- ✅ Directory structure
-- ✅ Build system
-- ✅ Toolchain guide
+### Phase 1 — Environment Setup ✅
+Directory structure, build system, toolchain guide.
 
-### Phase 2: Bootloader Stage 1 ✅ COMPLETE
-- ✅ 512-byte MBR
-- ✅ BIOS interrupts for display
-- ✅ Boot signature
+### Phase 2 — Bootloader Stage 1 ✅
+512-byte MBR, boot signature, BIOS text output.
 
-### Phase 3: Bootloader Stage 2 ✅ COMPLETE
-- A20 line enabling
-- GDT setup
-- Protected mode transition
-- Kernel loading with TUI boot menu
+### Phase 3 — Bootloader Stage 2 ✅
+A20 line, GDT + protected mode transition, E820 memory detection, TUI boot menu with countdown, INT 13h LBA kernel load.
 
-### Phase 4: Kernel Foundation ✅ COMPLETE
-- Kernel entry point
-- VGA text mode driver (80x25, color, hardware cursor)
-- kprintf() implementation
-- Kernel panic handler
+### Phase 4 — Kernel Foundation ✅
+Kernel entry point (ASM → C), VGA text driver (80×25, hardware cursor), `kprintf`, kernel panic handler.
 
-### Phase 5: Interrupts & Exceptions ✅ COMPLETE
-- IDT setup
-- Exception handlers
-- PIC remapping, PIT @ 100 Hz, keyboard driver (full Set 1)
+### Phase 5 — Interrupts ✅
+IDT (256 gates), 8259A PIC remapping, PIT at 100 Hz, PS/2 keyboard driver (IRQ1, Set 1 scancodes, readline with mid-line editing).
 
-### Phase 6: PD-Shell + User System ✅ COMPLETE
-- Login screen with 3-attempt lockout
-- FNV-1a password hashing (plaintext zeroed after boot)
-- User table with uid and root flag
-- PD-Shell with readline, mid-line editing, color prompt
-- Built-ins: help, clear, echo, version, uptime, color, whoami, logout, reboot
+### Phase 6 — PD-Shell + User System ✅
+Login screen (3-attempt lockout), FNV-1a password hashing (plaintext zeroed after boot), user table (uid, gid, root flag), PD-Shell Tier 1 (help, echo, version, color, whoami, logout, reboot, shutdown).
 
-### Phase 7: Memory Management
-- Physical memory allocator
-- Paging
-- Virtual memory
-- Kernel heap (kmalloc/kfree)
+### Phase 7 — Memory Management ✅
+E820 memory map parsing, bitmap PMM (4 KB pages), kernel-space paging (identity map + MMIO), `kmalloc`/`kfree` heap.
 
-### Phase 8: Filesystem
-- ATA disk driver
-- FAT12 or simple custom FS
-- VFS layer
-- File and directory operations
-- Migrate user table to /etc/passwd
+### Phase 8 — Storage & Filesystem ✅
+- ATA/IDE PIO driver (28-bit LBA, cache flush, reserved-sector guard)
+- VFS layer (driver registry, mount table, longest-prefix dispatch)
+- PDFS v2 — native read/write filesystem:
+  - Superblock at LBA 200, root dir sectors 202–205, data from LBA 206
+  - 64-byte dirents, 32 per directory, subdirectory support
+  - Unix rwxrwxrwx permissions (uid/gid + mode bits)
+  - Monotonic `next_free_lba` allocator, single-sector targeted writes
+- FAT32, ext2, NTFS read-only drivers
 
-### Phase 9: Process Management
-- Process Control Blocks
-- Context switching
-- Round-robin scheduler
-- User mode separation (ring 3)
+### Phase 9a — PD-Shell Tier 2 ✅
+`ls`, `cat`, `write`, `rm`, `mkdir`, `mkpdfs`, `copy`, `move`, `sdir` (cd with `~`/`..`/abs/rel), `setp` (chmod), `seto` (chown), `elev` (elevated privileges), `memmap`, `meminfo`, `heap`, `diskinfo`. CWD session state with `normalize_path()`.
 
-### Phase 10: CLI Shell Tier 2
-- Command parser with scripting
-- Built-in commands (ls, cat, mkdir, etc.)
-- Tab completion and command history
-- Pipe and redirect support
+### Phase 9b — Next
+- ⬜ Command history (↑/↓ arrows)
+- ⬜ Tab completion
 
-### Phase 10: Integration & Polish (Week 12)
-- Boot optimization
-- Error handling
-- Documentation
-- Testing and bug fixes
-
-### Future: GUI (Post 3-months)
-- VESA graphics mode
-- Window manager
-- GUI toolkit
-- Desktop environment
+### Future
+- ⬜ Process management (PCBs, context switching, scheduler, ring 3)
+- ⬜ GUI / VESA framebuffer graphics
+- ⬜ Desktop environment
 
 ---
 
 ## 🧪 Testing
 
 ### QEMU (Recommended)
-Fast iteration for development:
+
 ```bash
-make run              # Normal boot
-make run-debug        # With debug output
+bash build.sh
+qemu-system-i386 -drive format=raw,file=build/pd-os.img -m 128M -display sdl
 ```
 
-### Real Hardware (Advanced)
-After thorough emulator testing, boot from USB:
-```bash
-# WARNING: Double-check device name!
-# Linux:
-sudo dd if=build/pd-os.img of=/dev/sdX bs=4M
-sync
+### Real Hardware
 
-# Windows: Use Rufus utility in DD mode
+After thorough emulator testing you can write the image to a USB drive:
+
+```bash
+# WARNING: Double-check your device name — this will erase it!
+sudo dd if=build/pd-os.img of=/dev/sdX bs=4M status=progress
+sync
 ```
 
 ---
 
 ## 🐛 Troubleshooting
 
-### "Command not found" errors
-- Tools not in PATH
-- See [tools/setup.md](tools/setup.md) for installation
-- Restart terminal after modifying PATH
-
-### Build fails with "nasm: command not found"
-```powershell
-# Check installation
-make setup-check
-
-# Install NASM (see tools/setup.md)
-```
-
-### Bootloader wrong size
+### Build fails — cross-compiler not found
 ```bash
-# Must be exactly 512 bytes
-# Check current size:
-wc -c build/bootloader.bin   # Git Bash
-(Get-Item build/bootloader.bin).Length  # PowerShell
+# Install the i686 cross-compiler (Debian/Ubuntu)
+sudo apt install gcc-i686-linux-gnu binutils-i686-linux-gnu
 ```
 
 ### QEMU won't start
-- Check QEMU is installed: `qemu-system-i386 --version`
-- Verify disk image exists: `ls build/pd-os.img`
-- Try manual command: `qemu-system-i386 -drive format=raw,file=build/pd-os.img`
+```bash
+qemu-system-i386 --version    # verify it's installed
+ls -lh build/pd-os.img        # verify image was created
+```
 
-### Nothing appears on screen in QEMU
-- Bootloader might not be running
-- Check boot signature (bytes 510-511 should be 0xAA55)
-- Verify disk image creation succeeded
+### Disk image corrupt / unbootable after use
+This was a previously fixed bug (PDFS dirent struct was 60B not 64B, causing a BSS overflow that zeroed `g_base_lba` and wrote the superblock over the MBR on every disk write). The ATA driver now also refuses all writes to LBA < 200 as a safety guard.
+
+---
+
+## 📚 Documentation
+
+- **[PD-OS-plan.md](PD-OS-plan.md)** — Original implementation plan
+- **[PROJECT_STATUS.md](PROJECT_STATUS.md)** — Phase-by-phase status log
+- **[tools/setup.md](tools/setup.md)** — Toolchain setup guide
 
 ---
 
 ## 📖 Learning Resources
 
-### Essential Reading
-1. [OSDev Wiki](https://wiki.osdev.org/) - Comprehensive OS development guide
-2. [BIOS Interrupt List](http://www.ctyme.com/intr/int.htm) - Reference for BIOS functions
-3. Intel x86 Manuals - Architecture reference
-4. NASM Documentation - Assembly syntax
-
-### Recommended Books
-- "Operating Systems: Three Easy Pieces" by Remzi H. Arpaci-Dusseau
-- "Modern Operating Systems" by Andrew S. Tanenbaum
-- "Writing a Simple Operating System from Scratch" by Nick Blundell
-
-### Tutorials
-- [OSDev Bare Bones](https://wiki.osdev.org/Bare_Bones)
-- [Writing a Bootloader](https://wiki.osdev.org/Rolling_Your_Own_Bootloader)
-- [Protected Mode](https://wiki.osdev.org/Protected_Mode)
+1. [OSDev Wiki](https://wiki.osdev.org/) — Comprehensive OS development reference
+2. Intel x86 Software Developer Manuals — Architecture reference
+3. NASM Documentation — Assembly syntax
+4. *Operating Systems: Three Easy Pieces* — Arpaci-Dusseau
+5. *Modern Operating Systems* — Tanenbaum
 
 ---
 
@@ -387,17 +300,30 @@ wc -c build/bootloader.bin   # Git Bash
 ### How You Can Help
 
 **🔧 Development Areas:**
-- Bootloader enhancements (Stage 2, disk loading, memory detection)
-- Kernel development (memory management, process scheduling, drivers)
-- Filesystem implementation
-- CLI shell and commands
-- GUI framework (future)
-- Device drivers (keyboard, mouse, storage, graphics)
+- Process management (PCBs, context switching, round-robin scheduler, ring 3)
+- GUI / VESA framebuffer graphics
+- Window manager and desktop environment
+- Device drivers (mouse, USB, storage, sound)
+- PDFS v2 enhancements (file append, directory listing improvements)
+- Shell features (command history, tab completion, pipes/redirects)
+- Network stack (very future)
 
 **📚 Documentation:**
-- Improve setup guides for different platforms
-- Write tutorials and how-to guides
-- Create architecture documentation
+- Architecture deep-dives
+- Developer tutorials
+- Contribution guides
+
+### Getting Started
+
+1. Fork the repository
+2. Install the toolchain (see requirements above)
+3. `bash build.sh` — confirm zero warnings
+4. Run in QEMU and explore
+5. Pick an open item from the roadmap and submit a PR
+
+---
+
+*PD-OS — built from scratch, one sector at a time.*
 - Comment and explain complex code sections
 
 **🧪 Testing:**
@@ -454,32 +380,11 @@ This project is open source and available for educational purposes.
 ## 🎓 About
 
 **Project**: PD-OS  
-**Version**: 0.1.0 (Phase 6 Complete)  
+**Version**: 0.1.0 (Phase 9a Complete)  
 **Started**: April 2026  
 **Target**: Custom 32-bit x86 operating system  
 **Learning Focus**: Low-level programming, OS architecture, systems development
 
 ---
 
-## ✅ Next Steps for You
-
-1. **Install missing tools** (NASM and i686-elf-gcc)
-   - Follow the guide: [tools/setup.md](tools/setup.md)
-   
-2. **Build the bootloader**
-   ```bash
-   make all
-   ```
-
-3. **Test in QEMU**
-   ```bash
-   make run
-   ```
-
-4. **Begin Phase 3** (Bootloader Stage 2)
-   - See [PD-OS-plan.md](PD-OS-plan.md) for detailed steps
-
----
-
-**Status**: Phase 6 Complete ✓ | Ready for Phase 7 (Memory Management)  
-**Last Updated**: April 11, 2026
+*PD-OS — built from scratch, one sector at a time.*
