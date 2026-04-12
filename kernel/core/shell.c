@@ -271,7 +271,19 @@ static void cmd_help(int argc, char *argv[])
     vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     kprintf("    mkpdfs           ");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Format PDFS (erases all files)\n");
+    kprintf("Format PDFS v2 (requires elev, erases all files)\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    mkdir <dir>      ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Create a subdirectory\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    setp <f> <oct>   ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Set file permissions (octal mode)\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    seto <f> <u>:<g> ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Set file owner (e.g. seto f.txt pd:pd, requires elev)\n");
     vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     kprintf("    elev <cmd>       ");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
@@ -433,8 +445,8 @@ static void cmd_diskinfo(int argc, char *argv[])
     kprintf("    LBA   0        Stage 1 bootloader\n");
     kprintf("    LBA   1-5      Stage 2 bootloader\n");
     kprintf("    LBA   6-133    Kernel image (64 KB window)\n");
-    kprintf("    LBA  200-202   PDFS metadata\n");
-    kprintf("    LBA  203-2047  PDFS data\n");
+    kprintf("    LBA  200-205   PDFS v2 metadata\n");
+    kprintf("    LBA  206-2047  PDFS v2 data\n");
     kprintf("    LBA  2048-4095 FAT32 volume (/mnt/fat)\n");
     kprintf("    LBA  4096-69631 ext2 volume  (/mnt/ext2)\n");
     kprintf("    LBA  69632+    NTFS volume  (/mnt/ntfs, read-only)\n\n");
@@ -467,6 +479,21 @@ static void sh_pad(const char *s, int width)
 
 /* ---- FS commands ---------------------------------------------------------- */
 
+/* Format Unix mode bits as rwxrwxrwx string into buf[10] (incl NUL). */
+static void fmt_mode(uint16_t mode, char *buf)
+{
+    buf[0] = (mode & 0x100u) ? 'r' : '-';
+    buf[1] = (mode & 0x080u) ? 'w' : '-';
+    buf[2] = (mode & 0x040u) ? 'x' : '-';
+    buf[3] = (mode & 0x020u) ? 'r' : '-';
+    buf[4] = (mode & 0x010u) ? 'w' : '-';
+    buf[5] = (mode & 0x008u) ? 'x' : '-';
+    buf[6] = (mode & 0x004u) ? 'r' : '-';
+    buf[7] = (mode & 0x002u) ? 'w' : '-';
+    buf[8] = (mode & 0x001u) ? 'x' : '-';
+    buf[9] = '\0';
+}
+
 static void cmd_ls(int argc, char *argv[])
 {
     vfs_node_t  node;
@@ -481,17 +508,28 @@ static void cmd_ls(int argc, char *argv[])
     }
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("  ");
-    sh_pad("Name", 16);
-    kprintf("  Size\n");
-    kprintf("  ----------------  --------\n");
+    sh_pad("Name", 20);
+    kprintf("  ");
+    sh_pad("Mode", 10);
+    kprintf("  Uid  Size\n");
+    kprintf("  --------------------  ----------  ---  --------\n");
 
     for (;;) {
-        if (vfs_readdir(path, count, &node) != 0) break;
+        pdfs_dirent_t de;
+        if (pdfs_stat_root(count, &de) != 0) break;
+        (void)node;   /* still used below for vfs-routed mounts */
+        char mbuf[10];
+        fmt_mode(de.mode, mbuf);
         kprintf("  ");
-        vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-        sh_pad(node.name, 16);
+        if (de.flags & PDFS_FLAG_DIR) vga_set_color(VGA_COLOR_LIGHT_CYAN,  VGA_COLOR_BLACK);
+        else                          vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        sh_pad(de.name, 20);
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-        kprintf("  %u bytes\n", node.size);
+        kprintf("  ");
+        sh_pad(mbuf, 10);
+        kprintf("  %u", (uint32_t)de.uid);
+        if (de.flags & PDFS_FLAG_DIR) kprintf("    <DIR>\n");
+        else                          kprintf("    %u bytes\n", de.size);
         count++;
     }
 
@@ -500,7 +538,7 @@ static void cmd_ls(int argc, char *argv[])
         kprintf("  (empty)\n");
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     } else {
-        kprintf("  %u file%s\n", count, count == 1 ? "" : "s");
+        kprintf("  %u entr%s\n", count, count == 1 ? "y" : "ies");
     }
     kprintf("\n");
 }
@@ -556,6 +594,7 @@ static void cmd_write(int argc, char *argv[])
     if (argc < 2) { kprintf("  Usage: write <file> [text]\n"); return; }
 
     make_path(path, argv[1]);
+    pdfs_set_context(g_session_user, g_elevated);
 
     /* Assemble content from remaining args */
     for (i = 2; i < argc; i++) {
@@ -591,11 +630,16 @@ static void cmd_rm(int argc, char *argv[])
     char path[64];
     if (argc < 2) { kprintf("  Usage: rm <file>\n"); return; }
     make_path(path, argv[1]);
-    if (vfs_unlink(path) == 0)
+    pdfs_set_context(g_session_user, g_elevated);
+    int r = vfs_unlink(path);
+    if (r == 0)
         kprintf("  Removed '%s'\n", argv[1]);
     else {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        kprintf("  rm: '%s': file not found\n", argv[1]);
+        if (r == -3)
+            kprintf("  rm: '%s': permission denied\n", argv[1]);
+        else
+            kprintf("  rm: '%s': file not found\n", argv[1]);
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     }
 }
@@ -603,8 +647,15 @@ static void cmd_rm(int argc, char *argv[])
 static void cmd_mkpdfs(int argc, char *argv[])
 {
     (void)argc; (void)argv;
-    kprintf("  Formatting PDFS at LBA 69... ");
-    if (pdfs_format(69) != 0) {
+    /* Require elevated privileges */
+    if (!g_elevated && !(g_session_user && (g_session_user->flags & USER_FLAG_ROOT))) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  mkpdfs: requires elevated privileges (use elev mkpdfs)\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    kprintf("  Formatting PDFS v2 at LBA 200... ");
+    if (pdfs_format(200) != 0) {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         kprintf("FAILED\n");
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
@@ -613,7 +664,111 @@ static void cmd_mkpdfs(int argc, char *argv[])
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     kprintf("done\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("  PDFS reformatted. All files erased.\n");
+    kprintf("  PDFS v2 formatted. Journal ready. All files erased.\n");
+}
+
+static void cmd_mkdir(int argc, char *argv[])
+{
+    char path[64];
+    if (argc < 2) { kprintf("  Usage: mkdir <dir>\n"); return; }
+    make_path(path, argv[1]);
+    pdfs_set_context(g_session_user, g_elevated);
+    uint8_t uid = g_session_user ? g_session_user->uid : 0u;
+    if (pdfs_mkdir(path, uid, 0, 0) == 0)
+        kprintf("  mkdir: created '%s'\n", argv[1]);
+    else {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  mkdir: failed (exists, full, or read-only)\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    }
+}
+
+static void cmd_setp(int argc, char *argv[])
+{
+    char path[64];
+    int  mode = 0;
+    char *p;
+    if (argc < 3) { kprintf("  Usage: setp <file> <octal-mode>\n"); return; }
+    /* Parse octal */
+    for (p = argv[2]; *p >= '0' && *p <= '7'; p++) mode = mode * 8 + (*p - '0');
+    make_path(path, argv[1]);
+    pdfs_set_context(g_session_user, g_elevated);
+    if (pdfs_chmod(path, (uint16_t)mode) == 0)
+        kprintf("  setp: mode set to 0%u\n", (uint32_t)mode);
+    else {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  setp: failed (not found or permission denied)\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    }
+}
+
+/* Parse a uid/gid token: either a username looked up in the user table,
+ * or a plain decimal number.  Returns the resolved id, or 0 if not found. */
+static uint8_t resolve_id(const char *token)
+{
+    /* Try user table first */
+    const user_t *u = users_get(token);
+    if (u) return u->uid;
+    /* Fall back to decimal */
+    uint8_t v = 0;
+    const char *p;
+    for (p = token; *p >= '0' && *p <= '9'; p++) v = (uint8_t)(v * 10 + (*p - '0'));
+    return v;
+}
+
+static void cmd_seto(int argc, char *argv[])
+{
+    char path[64];
+    char utoken[32], gtoken[32];
+    uint8_t uid, gid;
+
+    /* Accept:  seto <file> <user>:<group>
+     *      or  seto <file> <user> <group>   */
+    if (argc < 3) {
+        kprintf("  Usage: seto <file> <user>:<group>\n");
+        kprintf("  e.g.:  seto file.txt pd:pd\n");
+        return;
+    }
+
+    if (argc == 3) {
+        /* Single arg — split on ':' */
+        char *colon = argv[2];
+        uint32_t i = 0;
+        while (colon[i] && colon[i] != ':') i++;
+        if (colon[i] != ':') {
+            kprintf("  Usage: seto <file> <user>:<group>\n");
+            return;
+        }
+        uint32_t k;
+        for (k = 0; k < i && k < 31u; k++) utoken[k] = colon[k];
+        utoken[k] = '\0';
+        /* gtoken from after ':' */
+        k = 0;
+        const char *gp = colon + i + 1;
+        while (*gp && k < 31u) gtoken[k++] = *gp++;
+        gtoken[k] = '\0';
+    } else {
+        /* Two separate args */
+        uint32_t k = 0;
+        while (argv[2][k] && k < 31u) { utoken[k] = argv[2][k]; k++; }
+        utoken[k] = '\0';
+        k = 0;
+        while (argv[3][k] && k < 31u) { gtoken[k] = argv[3][k]; k++; }
+        gtoken[k] = '\0';
+    }
+
+    uid = resolve_id(utoken);
+    gid = resolve_id(gtoken);
+
+    make_path(path, argv[1]);
+    pdfs_set_context(g_session_user, g_elevated);
+    if (pdfs_chown(path, uid, gid) == 0)
+        kprintf("  seto: owner set to %s:%s\n", utoken, gtoken);
+    else {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  seto: failed (not found or permission denied)\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    }
 }
 
 static void cmd_logout(int argc, char *argv[])
@@ -668,6 +823,9 @@ static const command_t commands[] = {
     { "write",    cmd_write    },
     { "rm",       cmd_rm       },
     { "mkpdfs",   cmd_mkpdfs   },
+    { "mkdir",    cmd_mkdir    },
+    { "setp",     cmd_setp     },
+    { "seto",     cmd_seto     },
     { "elev",     cmd_elev     },
     { "logout",   cmd_logout   },
     { "reboot",   cmd_reboot   },
