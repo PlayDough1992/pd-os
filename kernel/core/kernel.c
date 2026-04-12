@@ -13,6 +13,7 @@
 #include "login.h"
 #include "shell.h"
 #include "e820.h"
+#include "pmm.h"
 
 void kernel_main(void)
 {
@@ -68,6 +69,13 @@ void kernel_main(void)
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     kprintf("  (X) %u entr%s\n",
             e820_count(), e820_count() == 1 ? "y" : "ies");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    kprintf("  (0) Initialising PMM...");
+    pmm_init();
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("  (X) %u MB free\n",
+            (pmm_free_frames() * PMM_PAGE_SIZE) / (1024u * 1024u));
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
     /* ---- Enable interrupts ----------------------------------------------- */

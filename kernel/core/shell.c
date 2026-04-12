@@ -10,6 +10,7 @@
 #include "pit.h"
 #include "users.h"
 #include "e820.h"
+#include "pmm.h"
 
 /* ---- Session state -------------------------------------------------------- */
 
@@ -189,6 +190,10 @@ static void cmd_help(int argc, char *argv[])
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Show physical memory map (E820)\n");
     vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    meminfo          ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Show memory usage (free/used/total)\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     kprintf("    logout           ");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Log out and return to login screen\n");
@@ -288,6 +293,22 @@ static void cmd_memmap(int argc, char *argv[])
     e820_print();
 }
 
+static void cmd_meminfo(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    uint32_t free_mb  = (pmm_free_frames()  * PMM_PAGE_SIZE) / (1024u * 1024u);
+    uint32_t used_mb  = (pmm_used_frames()  * PMM_PAGE_SIZE) / (1024u * 1024u);
+    uint32_t total_mb = (pmm_total_frames() * PMM_PAGE_SIZE) / (1024u * 1024u);
+    vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+    kprintf("\n  Memory usage:\n");
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("    Free:   %u MB  (%u frames)\n", free_mb,  pmm_free_frames());
+    vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+    kprintf("    Used:   %u MB  (%u frames)\n", used_mb,  pmm_used_frames());
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("    Total:  %u MB  (%u frames)\n\n", total_mb, pmm_total_frames());
+}
+
 static void cmd_logout(int argc, char *argv[])
 {
     (void)argc; (void)argv;
@@ -330,6 +351,7 @@ static const command_t commands[] = {
     { "color",   cmd_color   },
     { "whoami",   cmd_whoami   },
     { "memmap",   cmd_memmap   },
+    { "meminfo",  cmd_meminfo  },
     { "logout",   cmd_logout   },
     { "reboot",   cmd_reboot   },
     { "shutdown", cmd_shutdown },
