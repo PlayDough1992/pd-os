@@ -7,7 +7,7 @@
 #include "kernel.h"
 #include "users.h"
 
-#define SHELL_BUF_SIZE  256
+#define SHELL_BUF_SIZE  512
 #define SHELL_MAX_ARGS  16
 
 /*

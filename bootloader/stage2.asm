@@ -167,21 +167,35 @@ stage2_start:
     ; ------------------------------------------------------------------
     ; ------------------------------------------------------------------
     ; Load kernel using INT 13h Extended Read (AH=42h, LBA mode)
-    ; Target: 0x1000:0x0000 = physical 0x10000 (safe low memory)
-    ; Kernel will be copied to 0x100000 in protected mode
-    ; Read 128 sectors (64 KB) from LBA 6
+    ; Split into two reads to avoid crossing the 64KB DMA boundary.
+    ;   Read 1: 128 sectors from LBA 6   -> 0x1000:0x0000 (physical 0x10000)
+    ;   Read 2:  32 sectors from LBA 134 -> 0x2000:0x0000 (physical 0x20000)
+    ; Total: 160 sectors = 80 KB
     ; ------------------------------------------------------------------
     mov  si, msg_kernel_load
     call print_color_str
 
+    ; --- First read: 128 sectors (64 KB) ---
     mov  word  [dap_count],   128    ; 128 sectors = 64 KB
     mov  word  [dap_offset],  0x0000 ; buffer: 0x1000:0x0000 = physical 0x10000
     mov  word  [dap_segment], 0x1000
     mov  dword [dap_lba_lo],  6      ; kernel starts at LBA 6
     mov  dword [dap_lba_hi],  0
-    mov  ah, 0x42                    ; Extended Read
+    mov  ah, 0x42
     mov  dl, [boot_drive]
-    mov  si, dap                     ; DS:SI -> DAP
+    mov  si, dap
+    int  0x13
+    jc   .kernel_err
+
+    ; --- Second read: 32 sectors (16 KB) into next 64KB page ---
+    mov  word  [dap_count],   32     ; 32 sectors = 16 KB
+    mov  word  [dap_offset],  0x0000 ; buffer: 0x2000:0x0000 = physical 0x20000
+    mov  word  [dap_segment], 0x2000
+    mov  dword [dap_lba_lo],  134    ; LBA 6 + 128
+    mov  dword [dap_lba_hi],  0
+    mov  ah, 0x42
+    mov  dl, [boot_drive]
+    mov  si, dap
     int  0x13
     jc   .kernel_err
 
@@ -238,10 +252,16 @@ pm_entry:
     mov  ss, ax
     mov  esp, 0x9FC00           ; kernel stack (below BIOS data area)
 
-    ; Copy kernel: 0x10000 -> 0x100000  (128 sectors = 65536 bytes = 16384 dwords)
+    ; Copy kernel chunk 1: 0x10000 -> 0x100000  (128 sectors = 65536 bytes = 16384 dwords)
     mov  esi, 0x10000
     mov  edi, 0x100000
     mov  ecx, 16384
+    rep  movsd
+
+    ; Copy kernel chunk 2: 0x20000 -> 0x110000  (32 sectors = 16384 bytes = 4096 dwords)
+    mov  esi, 0x20000
+    mov  edi, 0x110000
+    mov  ecx, 4096
     rep  movsd
 
     ; Jump to kernel entry point
