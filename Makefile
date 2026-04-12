@@ -19,22 +19,23 @@ KERNEL_DIR = kernel
 TOOLS_DIR = tools
 
 # Output files
-DISK_IMAGE = $(BUILD_DIR)/pd-os.img
+DISK_IMAGE     = $(BUILD_DIR)/pd-os.img
 BOOTLOADER_BIN = $(BUILD_DIR)/bootloader.bin
-KERNEL_BIN = $(BUILD_DIR)/kernel.bin
+STAGE2_BIN     = $(BUILD_DIR)/stage2.bin
+KERNEL_ELF     = $(BUILD_DIR)/kernel.elf
+KERNEL_BIN     = $(BUILD_DIR)/kernel.bin
 
-# Tools - adjust paths if needed
-ASM = nasm
-CC = i686-elf-gcc
-LD = i686-elf-ld
-OBJCOPY = i686-elf-objcopy
+# Tools — use i686-linux-gnu cross-toolchain (apt: gcc-i686-linux-gnu)
+ASM     = nasm
+CC      = i686-linux-gnu-gcc
+LD      = i686-linux-gnu-ld
+OBJCOPY = i686-linux-gnu-objcopy
 
 # Assembler flags
-ASMFLAGS = -f bin
-
+ASMFLAGS = -f binASMFLAGS  = -f bin
 # Compiler flags for kernel (will be used later)
 CFLAGS = -m32 -ffreestanding -nostdlib -nostdinc -fno-builtin -fno-stack-protector \
-         -nostartfiles -nodefaultlibs -Wall -Wextra -Werror -c
+         -nostartfiles -nodefaultlibs -fno-pic -fno-pie -Wall -Wextra -Werror -c
 
 # Linker flags
 LDFLAGS = -m elf_i386 -nostdlib
@@ -79,16 +80,12 @@ help:
 # ============================================================================
 # Disk image creation
 # ============================================================================
-$(DISK_IMAGE): $(BOOTLOADER_BIN) | $(BUILD_DIR)
+$(DISK_IMAGE): $(BOOTLOADER_BIN) $(STAGE2_BIN) $(KERNEL_BIN) | $(BUILD_DIR)
 	@echo "Creating disk image..."
-	
-	# Create a blank disk image (1.44MB floppy)
-	dd if=/dev/zero of=$(DISK_IMAGE) bs=512 count=$(DISK_SIZE) 2>/dev/null || \
-		(echo "Error: dd command failed. Ensure Git Bash or MinGW is installed." && exit 1)
-	
-	# Write bootloader to first sector
-	dd if=$(BOOTLOADER_BIN) of=$(DISK_IMAGE) conv=notrunc bs=512 count=1 2>/dev/null
-	
+	dd if=/dev/zero          of=$(DISK_IMAGE) bs=512 count=$(DISK_SIZE) 2>/dev/null
+	dd if=$(BOOTLOADER_BIN)  of=$(DISK_IMAGE) conv=notrunc bs=512 seek=0 count=1 2>/dev/null
+	dd if=$(STAGE2_BIN)      of=$(DISK_IMAGE) conv=notrunc bs=512 seek=1 2>/dev/null
+	dd if=$(KERNEL_BIN)      of=$(DISK_IMAGE) conv=notrunc bs=512 seek=6 2>/dev/null
 	@echo "✓ Disk image created: $(DISK_IMAGE)"
 
 # ============================================================================
@@ -98,27 +95,55 @@ bootloader: $(BOOTLOADER_BIN)
 
 $(BOOTLOADER_BIN): $(BOOTLOADER_DIR)/stage1.asm | $(BUILD_DIR)
 	@echo "Building PD-Bootloader Stage 1..."
-	$(ASM) $(ASMFLAGS) $(BOOTLOADER_DIR)/stage1.asm -o $(BOOTLOADER_BIN)
-	
-	# Verify bootloader is exactly 512 bytes
+	$(ASM) -f bin $(BOOTLOADER_DIR)/stage1.asm -o $(BOOTLOADER_BIN)
 	@if [ $$(wc -c < $(BOOTLOADER_BIN)) -ne 512 ]; then \
 		echo "ERROR: Bootloader must be exactly 512 bytes!"; \
-		echo "Current size: $$(wc -c < $(BOOTLOADER_BIN)) bytes"; \
 		exit 1; \
 	fi
-	
-	@echo "✓ Bootloader built: $(BOOTLOADER_BIN) (512 bytes)"
+	@echo "✓ Stage 1: $(BOOTLOADER_BIN) (512 bytes)"
+
+$(STAGE2_BIN): $(BOOTLOADER_DIR)/stage2.asm | $(BUILD_DIR)
+	@echo "Building PD-Bootloader Stage 2..."
+	$(ASM) -f bin $(BOOTLOADER_DIR)/stage2.asm -o $(STAGE2_BIN)
+	@echo "✓ Stage 2: $(STAGE2_BIN) ($$(wc -c < $(STAGE2_BIN)) bytes)"
 
 # ============================================================================
-# Kernel build (Phase 4+)
+# Kernel build
 # ============================================================================
+KERNEL_SRCS_C = $(KERNEL_DIR)/drivers/vga.c \
+                $(KERNEL_DIR)/core/io.c \
+                $(KERNEL_DIR)/core/panic.c \
+                $(KERNEL_DIR)/core/kernel.c
+KERNEL_SRCS_ASM = $(KERNEL_DIR)/arch/x86/entry.asm
+KERNEL_OBJS = $(BUILD_DIR)/entry.o \
+              $(BUILD_DIR)/vga.o \
+              $(BUILD_DIR)/io.o \
+              $(BUILD_DIR)/panic.o \
+              $(BUILD_DIR)/kernel_main.o
+
 kernel: $(KERNEL_BIN)
 
-$(KERNEL_BIN):
-	@echo "Kernel build not yet implemented (Phase 4)"
-	@echo "Creating placeholder kernel..."
-	@mkdir -p $(BUILD_DIR)
-	@echo -n "KERNEL" > $(KERNEL_BIN)
+$(BUILD_DIR)/entry.o: $(KERNEL_DIR)/arch/x86/entry.asm | $(BUILD_DIR)
+	$(ASM) -f elf32 $< -o $@
+
+$(BUILD_DIR)/vga.o: $(KERNEL_DIR)/drivers/vga.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(KERNEL_DIR)/include $< -o $@
+
+$(BUILD_DIR)/io.o: $(KERNEL_DIR)/core/io.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(KERNEL_DIR)/include $< -o $@
+
+$(BUILD_DIR)/panic.o: $(KERNEL_DIR)/core/panic.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(KERNEL_DIR)/include $< -o $@
+
+$(BUILD_DIR)/kernel_main.o: $(KERNEL_DIR)/core/kernel.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(KERNEL_DIR)/include $< -o $@
+
+$(KERNEL_ELF): $(KERNEL_OBJS)
+	$(LD) $(LDFLAGS) -T $(KERNEL_DIR)/linker.ld $(KERNEL_OBJS) -o $@
+
+$(KERNEL_BIN): $(KERNEL_ELF)
+	$(OBJCOPY) -O binary $< $@
+	@echo "✓ Kernel: $(KERNEL_BIN) ($$(wc -c < $(KERNEL_BIN)) bytes)"
 
 # ============================================================================
 # Run in QEMU
@@ -151,10 +176,10 @@ setup-check:
 	@echo -n "Checking NASM... "
 	@which $(ASM) > /dev/null 2>&1 && echo "✓ Found" || echo "✗ Not found"
 	
-	@echo -n "Checking i686-elf-gcc... "
+	@echo -n "Checking i686-linux-gnu-gcc... "
 	@which $(CC) > /dev/null 2>&1 && echo "✓ Found" || echo "✗ Not found"
 	
-	@echo -n "Checking i686-elf-ld... "
+	@echo -n "Checking i686-linux-gnu-ld... "
 	@which $(LD) > /dev/null 2>&1 && echo "✓ Found" || echo "✗ Not found"
 	
 	@echo -n "Checking QEMU... "

@@ -1,57 +1,77 @@
-# PD-OS Development Toolchain Setup Guide
+# PD-OS Development Toolchain Setup Guide (Linux)
 
-This guide will help you set up the complete development environment for building PD-OS on Windows.
+This guide covers setting up the complete development environment for building PD-OS on Linux.
 
 ## Required Tools
 
 1. **NASM** - Netwide Assembler (for bootloader and low-level kernel code)
-2. **MinGW-w64** - GCC cross-compiler for i686-elf target
+2. **i686-elf-gcc** - GCC cross-compiler targeting bare-metal 32-bit x86
 3. **QEMU** - x86 system emulator for testing
 4. **Make** - Build automation tool
-5. **dd** - Disk image creation (via Git Bash or MinGW)
+5. **dd** - Disk image creation (standard Linux utility)
+
+---
+
+## Quick Install (Automated)
+
+Run the automated setup script — it detects your distro and installs everything:
+
+```bash
+./tools/autosetup.sh
+```
+
+Or follow the manual steps below.
 
 ---
 
 ## Step 1: Install NASM
 
-NASM is the assembler we'll use for bootloader and CPU-specific assembly code.
+NASM is the assembler used for bootloader and CPU-specific assembly code.
 
-### Download & Install:
-1. Visit: https://www.nasm.us/pub/nasm/releasebuilds/
-2. Download the latest Windows installer (e.g., `nasm-x.xx.xx-installer-x64.exe`)
-3. Run the installer
-4. **Important**: Check "Add NASM to PATH" during installation
+### Ubuntu / Debian:
+```bash
+sudo apt-get update
+sudo apt-get install nasm
+```
+
+### Fedora / RHEL / CentOS:
+```bash
+sudo dnf install nasm
+```
+
+### Arch Linux / Manjaro:
+```bash
+sudo pacman -S nasm
+```
 
 ### Verify Installation:
-```powershell
+```bash
 nasm -v
 ```
 **Expected output**: `NASM version 2.xx.xx` or similar
 
 ---
 
-## Step 2: Install MinGW-w64 (i686-elf Cross-Compiler)
+## Step 2: Install i686-elf Cross-Compiler (Phase 4+ only)
 
-A cross-compiler is needed to build code for 32-bit x86 targets without linking to Windows libraries.
+A bare-metal cross-compiler is needed for kernel development (not required for Phases 1–3).
 
-### Option A: Pre-built Binaries (Recommended for Beginners)
+### Ubuntu / Debian (Linux-GNU target, quick option):
+```bash
+sudo apt-get install gcc-i686-linux-gnu binutils-i686-linux-gnu
+```
+> Note: This installs `i686-linux-gnu-gcc`. For a true freestanding `i686-elf-gcc`, build from source (see [tools/MANUAL_INSTALL.md](MANUAL_INSTALL.md)).
 
-1. Visit: https://github.com/lordmilko/i686-elf-tools/releases
-2. Download `i686-elf-tools-windows.zip`
-3. Extract to `C:\i686-elf-tools\`
-4. Add to PATH:
-   - Open Start Menu → Search "Environment Variables"
-   - Click "Environment Variables" button
-   - Under "System variables", select "Path" → Edit
-   - Add: `C:\i686-elf-tools\bin`
-   - Click OK
+### Arch Linux (via community/AUR):
+```bash
+sudo pacman -S cross-i686-elf-gcc cross-i686-elf-binutils
+```
 
-### Option B: Build from Source (Advanced)
-
-Follow the guide at: https://wiki.osdev.org/GCC_Cross-Compiler
+### Build from Source (all distros — recommended for OS development):
+Follow the OSDev guide: https://wiki.osdev.org/GCC_Cross-Compiler
 
 ### Verify Installation:
-```powershell
+```bash
 i686-elf-gcc --version
 i686-elf-ld --version
 ```
@@ -61,16 +81,25 @@ i686-elf-ld --version
 
 ## Step 3: Install QEMU
 
-QEMU is an emulator that lets us test PD-OS without rebooting or using real hardware.
+QEMU lets you test PD-OS without rebooting or using real hardware.
 
-### Download & Install:
-1. Visit: https://www.qemu.org/download/#windows
-2. Download the Windows installer
-3. Run the installer (default settings are fine)
-4. Add to PATH: `C:\Program Files\qemu\` (or installation directory)
+### Ubuntu / Debian:
+```bash
+sudo apt-get install qemu-system-x86
+```
+
+### Fedora / RHEL:
+```bash
+sudo dnf install qemu-system-x86
+```
+
+### Arch Linux:
+```bash
+sudo pacman -S qemu-arch-extra
+```
 
 ### Verify Installation:
-```powershell
+```bash
 qemu-system-i386 --version
 ```
 **Expected output**: `QEMU emulator version x.x.x`
@@ -79,124 +108,69 @@ qemu-system-i386 --version
 
 ## Step 4: Install Make
 
-Make automates the build process.
+Make is the primary build tool (already present on most Linux systems).
 
-### Option A: Via Chocolatey (Recommended)
+### Ubuntu / Debian:
+```bash
+sudo apt-get install make
+```
 
-1. Install Chocolatey (if not already installed):
-   ```powershell
-   Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-   ```
+### Fedora / RHEL:
+```bash
+sudo dnf install make
+```
 
-2. Install Make:
-   ```powershell
-   choco install make
-   ```
-
-### Option B: Via MinGW-w64 (Alternative)
-
-1. Download: https://sourceforge.net/projects/mingw-w64/
-2. Install with MSYS2
-3. Run: `pacman -S make`
-
-### Option C: Use Git Bash (If Git is installed)
-
-Git for Windows includes `make` in Git Bash.
+### Arch Linux:
+```bash
+sudo pacman -S make
+```
 
 ### Verify Installation:
-```powershell
+```bash
 make --version
 ```
 **Expected output**: `GNU Make x.x`
 
 ---
 
-## Step 5: Install Git Bash (Optional but Recommended)
+## Step 5: Verify Complete Setup
 
-Git Bash provides Unix-like tools including `dd` for disk image creation.
+Run the built-in toolchain check:
 
-### Download & Install:
-1. Visit: https://git-scm.com/download/win
-2. Download and run the installer
-3. Default options work fine
-
-### Verify Installation:
 ```bash
-# In Git Bash:
-dd --version
+make setup-check
+# or
+./build.sh setup-check
 ```
 
----
-
-## Step 6: Verify Complete Setup
-
-Run this verification script to ensure everything is installed correctly:
-
-```powershell
-# Create verification script
-Write-Output "=== PD-OS Toolchain Verification ==="
-Write-Output ""
-
-Write-Output "Checking NASM..."
-nasm -v
-if ($?) { Write-Output "✓ NASM installed" } else { Write-Output "✗ NASM missing" }
-Write-Output ""
-
-Write-Output "Checking i686-elf-gcc..."
-i686-elf-gcc --version | Select-Object -First 1
-if ($?) { Write-Output "✓ Cross-compiler installed" } else { Write-Output "✗ Cross-compiler missing" }
-Write-Output ""
-
-Write-Output "Checking QEMU..."
-qemu-system-i386 --version | Select-Object -First 1
-if ($?) { Write-Output "✓ QEMU installed" } else { Write-Output "✗ QEMU missing" }
-Write-Output ""
-
-Write-Output "Checking Make..."
-make --version | Select-Object -First 1
-if ($?) { Write-Output "✓ Make installed" } else { Write-Output "✗ Make missing" }
-Write-Output ""
-
-Write-Output "=== Verification Complete ==="
+Expected output:
+```
+=== Verifying PD-OS Toolchain Setup ===
+Checking nasm...          ✓ Found
+Checking i686-elf-gcc...  ✓ Found  (or ✗ Not found — OK until Phase 4)
+Checking i686-elf-ld...   ✓ Found
+Checking QEMU...          ✓ Found
 ```
 
 ---
 
 ## Troubleshooting
 
-### "Command not found" errors
-- Ensure all tools are added to your system PATH
-- Restart PowerShell/Terminal after modifying PATH
-- Verify PATH: `$env:Path -split ';'`
+### "command not found" errors
+- Confirm the package is installed: `which nasm`, `which qemu-system-i386`
+- Make sure your package manager install succeeded (no errors)
 
-### QEMU won't start
-- Check Windows Firewall settings
-- Run PowerShell as Administrator
+### QEMU display issues
+- Add `-display sdl` or `-display gtk` to the QEMU command if the window doesn't appear
+- For headless environments: `qemu-system-i386 ... -nographic`
 
 ### Cross-compiler linking errors
 - Ensure you're using `i686-elf-gcc`, not regular `gcc`
-- Use `-nostdlib -nostartfiles` flags
-- Don't link against Windows libraries
+- Use `-ffreestanding -nostdlib -nostartfiles` flags
+- Do not link against libc
 
-### Make errors
-- On Windows, use PowerShell or Git Bash
-- Check Makefile uses tabs (not spaces) for indentation
-- Use Unix-style paths in Makefile
-
----
-
-## Alternative: WSL (Windows Subsystem for Linux)
-
-If you encounter persistent issues with Windows tools, consider using WSL:
-
-```powershell
-# Enable WSL
-wsl --install -d Ubuntu
-
-# Inside WSL:
-sudo apt update
-sudo apt install nasm build-essential qemu-system-x86
-```
+### Make errors about tabs
+- Makefile rules must use **tab** characters for indentation, not spaces
 
 However, this guide assumes native Windows tools as requested.
 

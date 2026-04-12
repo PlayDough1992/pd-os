@@ -27,6 +27,11 @@ ATTR_GREEN      equ 0x0A    ; bright green on black
 
 MENU_TIMEOUT    equ 10
 
+; E820 memory map output addresses (must match e820.h in the kernel)
+E820_COUNT   equ 0x5000      ; dword: number of valid entries
+E820_ENTRIES equ 0x5004      ; 24-byte entries (base8 + len8 + type4 + acpi4)
+E820_MAX     equ 32
+
 ; ---------------------------------------------------------------------------
 ;  Entry
 ; ---------------------------------------------------------------------------
@@ -160,33 +165,44 @@ stage2_start:
     call print_color_str
 
     ; ------------------------------------------------------------------
-    ; Load kernel using standard CHS INT 13h (same method Stage 1 uses)
+    ; ------------------------------------------------------------------
+    ; Load kernel using INT 13h Extended Read (AH=42h, LBA mode)
     ; Target: 0x1000:0x0000 = physical 0x10000 (safe low memory)
-    ; kernel will be copied to 0x100000 in protected mode
-    ; Sector 7 = LBA 6.  12 sectors = 6 KB, stays within track 0.
+    ; Kernel will be copied to 0x100000 in protected mode
+    ; Read 128 sectors (64 KB) from LBA 6
     ; ------------------------------------------------------------------
     mov  si, msg_kernel_load
     call print_color_str
 
-    mov  ax, 0x1000
-    mov  es, ax
-    xor  bx, bx             ; ES:BX = 0x1000:0x0000 = physical 0x10000
-    mov  ah, 0x02           ; BIOS: read sectors
-    mov  al, 12             ; 12 sectors = 6 KB
-    mov  ch, 0              ; cylinder 0
-    mov  cl, 7              ; sector 7 = LBA 6
-    mov  dh, 0              ; head 0
+    mov  word  [dap_count],   128    ; 128 sectors = 64 KB
+    mov  word  [dap_offset],  0x0000 ; buffer: 0x1000:0x0000 = physical 0x10000
+    mov  word  [dap_segment], 0x1000
+    mov  dword [dap_lba_lo],  6      ; kernel starts at LBA 6
+    mov  dword [dap_lba_hi],  0
+    mov  ah, 0x42                    ; Extended Read
     mov  dl, [boot_drive]
+    mov  si, dap                     ; DS:SI -> DAP
     int  0x13
     jc   .kernel_err
 
-    ; Restore ES=0 before protected-mode transition
-    xor  ax, ax
-    mov  es, ax
-
     mov  si, msg_kernel_ok
     call print_color_str
-    ; ------------------------------------------------------------------
+
+    ; -----------------------------------------------------------------
+    ; Probe BIOS memory map (E820) before entering protected mode.
+    ; Results are written to E820_COUNT/E820_ENTRIES and read by the
+    ; kernel from those physical addresses after the switch.
+    ; -----------------------------------------------------------------
+    call do_e820
+    cmp  dword [E820_COUNT], 0
+    je   .e820_warn
+    mov  si, msg_e820_ok
+    call print_color_str
+    jmp  .e820_cont
+.e820_warn:
+    mov  si, msg_e820_warn
+    call print_color_str
+.e820_cont:
 
     lgdt [gdt_descriptor]
 
@@ -222,10 +238,10 @@ pm_entry:
     mov  ss, ax
     mov  esp, 0x9FC00           ; kernel stack (below BIOS data area)
 
-    ; Copy kernel: 0x10000 -> 0x100000  (12 sectors = 6144 bytes = 1536 dwords)
+    ; Copy kernel: 0x10000 -> 0x100000  (128 sectors = 65536 bytes = 16384 dwords)
     mov  esi, 0x10000
     mov  edi, 0x100000
-    mov  ecx, 1536
+    mov  ecx, 16384
     rep  movsd
 
     ; Jump to kernel entry point
@@ -236,6 +252,72 @@ pm_entry:
 ;  Back to 16-bit
 ; ===========================================================================
 [BITS 16]
+
+; ---------------------------------------------------------------------------
+;  do_e820  -  build physical memory map via BIOS INT 15h/E820
+;
+;  Writes to flat memory (ES=0):
+;    [E820_COUNT]   = uint32: number of valid entries stored
+;    [E820_ENTRIES] = array of 24-byte entries:
+;                     base(8) + length(8) + type(4) + acpi_ext(4)
+;
+;  ACPI 3.0 extended field is pre-set to 1 ("entry valid") so
+;  entries are usable even when the BIOS returns only 20 bytes.
+;
+;  Clobbers nothing (full pushad/pop es around entire routine).
+; ---------------------------------------------------------------------------
+do_e820:
+    pushad
+    push es
+
+    xor  ax, ax
+    mov  es, ax               ; ES = segment 0 (flat low memory)
+
+    mov  dword [E820_COUNT], 0
+    xor  ebx, ebx             ; continuation = 0 on first call
+    mov  di,  E820_ENTRIES    ; ES:DI = 0x0000:0x5004
+    xor  bp,  bp              ; entry counter (16-bit, max E820_MAX)
+
+.e820_loop:
+    ; Pre-set ACPI 3.0 extended attribute byte to 1 ("entry is valid").
+    ; If the BIOS returns only 20 bytes this dword is not overwritten
+    ; and stays 1, which is the correct default.
+    mov  dword [es:di+20], 1
+
+    mov  eax, 0xE820          ; function code
+    mov  ecx, 24              ; ask for 24-byte (ACPI 3.0) entries
+    mov  edx, 0x534D4150      ; 'SMAP' signature required by BIOS
+    int  0x15
+
+    jc   .e820_done           ; CF=1: list exhausted or unsupported
+    cmp  eax, 0x534D4150      ; BIOS must echo 'SMAP' back in EAX
+    jne  .e820_done
+    cmp  ecx, 20              ; must have filled at least 20 bytes
+    jl   .e820_skip
+
+    ; Skip zero-length regions (invalid / firmware artefacts)
+    mov  eax, dword [es:di+8]   ; length_low
+    or   eax, dword [es:di+12]  ; length_high
+    jz   .e820_skip
+
+    inc  bp                   ; count this entry
+    add  di,  24              ; advance write pointer
+    cmp  bp,  E820_MAX        ; safety cap
+    jae  .e820_done
+
+.e820_skip:
+    test ebx, ebx             ; EBX=0 means this was the final entry
+    jnz  .e820_loop
+
+.e820_done:
+    ; Store count as dword (zero-extend from bp)
+    xor  eax, eax
+    mov  ax,  bp
+    mov  dword [E820_COUNT], eax
+
+    pop  es
+    popad
+    ret
 
 ; ---------------------------------------------------------------------------
 ;  enable_a20  -  three methods, CF set on total failure
@@ -781,6 +863,8 @@ timer_post  db '  second(s) ...', 0
 
 ver_str     db 'PD-OS Bootloader v0.1  (c) PlayDough1992', 0
 
+msg_e820_ok     db ' >> Memory map built.', 0x0D, 0x0A, 0
+msg_e820_warn   db ' >> [WARN] E820 not supported; memory map empty.', 0x0D, 0x0A, 0
 msg_boot_start  db 0x0D, 0x0A
                 db ' >> Booting PD-OS...', 0x0D, 0x0A, 0
 msg_a20_ok      db ' >> A20 enabled.', 0x0D, 0x0A, 0

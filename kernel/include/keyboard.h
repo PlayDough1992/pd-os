@@ -1,0 +1,17 @@
+#pragma once
+
+/* ============================================================================
+ * PD-Kernel  —  PS/2 Keyboard driver
+ * ============================================================================ */
+
+#include "kernel.h"
+
+/* Special key codes returned by keyboard_getchar() */
+#define KEY_UP    '\x11'
+#define KEY_DOWN  '\x12'
+#define KEY_LEFT  '\x13'
+#define KEY_RIGHT '\x14'
+
+void keyboard_init(void);
+void keyboard_handler(void);
+char keyboard_getchar(void);

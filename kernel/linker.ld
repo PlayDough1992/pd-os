@@ -13,6 +13,8 @@ PHDRS {
 SECTIONS {
     . = 0x100000;
 
+    _kernel_start = .;
+
     .text : { *(.text*) } :text
 
     .rodata : { *(.rodata*) } :text
@@ -23,6 +25,8 @@ SECTIONS {
         *(COMMON)
         *(.bss*)
     } :data
+
+    _kernel_end = .;
 
     /DISCARD/ : {
         *(.note.GNU-stack)

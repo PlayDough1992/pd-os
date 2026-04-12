@@ -1,11 +1,17 @@
 #!/bin/bash
 # ============================================================================
-# sync-asm.sh — Commit and push .asm file changes to both branches
+# sync-asm.sh — Commit and push PD-OS source files to both branches
 # ============================================================================
 # Usage: ./sync-asm.sh "commit message"
 #
+# Syncs all OS-independent source files:
+#   *.asm  *.c  *.h  *.ld
+#
+# Excluded (host-OS specific):
+#   *.sh   *.ps1  Makefile  build.sh  build.ps1
+#
 # This script:
-#   1. Stages all modified/new .asm files
+#   1. Stages all modified/new source files matching the patterns above
 #   2. Commits them on the current branch
 #   3. Pushes the current branch
 #   4. Cherry-picks the commit onto the other branch (main <-> linux-build-env)
@@ -17,6 +23,9 @@ set -e
 
 BRANCH_A="main"
 BRANCH_B="linux-build-env"
+
+# Source file patterns to sync (not host-OS specific)
+SYNC_PATTERNS=("*.asm" "*.c" "*.h" "*.ld")
 
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -46,25 +55,32 @@ else
     exit 1
 fi
 
-# Check for .asm files with changes (modified, new, or deleted)
-ASM_FILES=$(git diff --name-only HEAD -- '*.asm'; git ls-files --others --exclude-standard -- '*.asm')
-if [ -z "$ASM_FILES" ] && ! git diff --cached --name-only -- '*.asm' | grep -q '.'; then
-    echo -e "${YELLOW}No .asm file changes detected.${NC}"
+# Check for source files with changes (modified, new, or deleted)
+CHANGED_FILES=""
+for pat in "${SYNC_PATTERNS[@]}"; do
+    CHANGED_FILES+=$(git diff --name-only HEAD -- "$pat")$'\n'
+    CHANGED_FILES+=$(git ls-files --others --exclude-standard -- "$pat")$'\n'
+done
+CHANGED_FILES=$(echo "$CHANGED_FILES" | sed '/^$/d')
+
+if [ -z "$CHANGED_FILES" ] && ! git diff --cached --name-only -- "${SYNC_PATTERNS[@]}" | grep -q '.'; then
+    echo -e "${YELLOW}No source file changes detected.${NC}"
     exit 0
 fi
 
-echo -e "${CYAN}ASM files to sync:${NC}"
-git diff --name-only HEAD -- '*.asm'
-git ls-files --others --exclude-standard -- '*.asm'
+echo -e "${CYAN}Source files to sync:${NC}"
+echo "$CHANGED_FILES"
 echo ""
 
-# Stage only .asm files
-git add -- '*.asm'
+# Stage the matching source files
+for pat in "${SYNC_PATTERNS[@]}"; do
+    git add -- "$pat" 2>/dev/null || true
+done
 
 # Verify something was staged
-STAGED=$(git diff --cached --name-only -- '*.asm')
+STAGED=$(git diff --cached --name-only -- "${SYNC_PATTERNS[@]}")
 if [ -z "$STAGED" ]; then
-    echo -e "${YELLOW}No .asm changes to commit.${NC}"
+    echo -e "${YELLOW}No source changes to commit.${NC}"
     exit 0
 fi
 
@@ -94,4 +110,4 @@ echo -e "${GREEN}[OK] Pushed $OTHER_BRANCH${NC}"
 # Return to original branch
 git checkout "$ORIGINAL_BRANCH"
 echo ""
-echo -e "${GREEN}Done! .asm changes synced to both '$ORIGINAL_BRANCH' and '$OTHER_BRANCH'.${NC}"
+echo -e "${GREEN}Done! Source changes synced to both '$ORIGINAL_BRANCH' and '$OTHER_BRANCH'.${NC}"

@@ -6,6 +6,9 @@
 
 #include "kernel.h"
 
+#define VGA_WIDTH  80
+#define VGA_HEIGHT 25
+
 /* VGA color codes (4-bit) */
 typedef enum {
     VGA_COLOR_BLACK          = 0,
@@ -30,5 +33,12 @@ void vga_init(void);
 void vga_clear(void);
 void vga_set_color(vga_color_t fg, vga_color_t bg);
 void vga_putchar(char c);
+void vga_backspace(void);
+uint8_t vga_get_col(void);
+uint8_t vga_get_row(void);
+void vga_cursor_left(void);
+void vga_cursor_right(void);
+void vga_cursor_up(void);
+void vga_cursor_down(void);
 void vga_puts(const char *s);
 void vga_set_cursor(uint8_t x, uint8_t y);
