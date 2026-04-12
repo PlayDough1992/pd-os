@@ -177,7 +177,7 @@ stage2_start:
     mov  es, ax
     xor  bx, bx             ; ES:BX = 0x1000:0x0000 = physical 0x10000
     mov  ah, 0x02           ; BIOS: read sectors
-    mov  al, 32             ; 32 sectors = 16 KB
+    mov  al, 64             ; 64 sectors = 32 KB
     mov  ch, 0              ; cylinder 0
     mov  cl, 7              ; sector 7 = LBA 6
     mov  dh, 0              ; head 0
@@ -243,10 +243,10 @@ pm_entry:
     mov  ss, ax
     mov  esp, 0x9FC00           ; kernel stack (below BIOS data area)
 
-    ; Copy kernel: 0x10000 -> 0x100000  (32 sectors = 16384 bytes = 4096 dwords)
+    ; Copy kernel: 0x10000 -> 0x100000  (64 sectors = 32768 bytes = 8192 dwords)
     mov  esi, 0x10000
     mov  edi, 0x100000
-    mov  ecx, 4096
+    mov  ecx, 8192
     rep  movsd
 
     ; Jump to kernel entry point
