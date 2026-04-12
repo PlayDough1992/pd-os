@@ -36,6 +36,13 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 ### Alias Table — `alias`
 ![Alias table](docs/screenshots/06-alias.png)
 
+### Autocomplete Suggestion Menu
+Typing a prefix instantly shows a live context menu of matching commands. Use ↑/↓ to navigate, Space to confirm.
+
+![Autocomplete — 'c' prefix](docs/screenshots/07-autocomplete.png)
+
+![Autocomplete — 's' prefix with selection](docs/screenshots/08-suggestion-menu.png)
+
 ---
 
 ## 🎯 Project Goals
