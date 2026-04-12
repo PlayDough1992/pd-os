@@ -231,6 +231,9 @@ int ata_read_sectors(uint32_t lba, uint8_t count, void *buf)
     return 0;
 }
 
+/* LBAs 0-199 hold the bootloader, stage2, and kernel image — never overwrite them. */
+#define ATA_RESERVED_LBA 200u
+
 int ata_write_sectors(uint32_t lba, uint8_t count, const void *buf)
 {
     const uint16_t *ptr = (const uint16_t *)buf;
@@ -240,6 +243,8 @@ int ata_write_sectors(uint32_t lba, uint8_t count, const void *buf)
         return -1;
     if (count == 0)
         return 0;
+    if (lba < ATA_RESERVED_LBA)
+        return -1;   /* refuse writes to boot/kernel sectors */
 
     /* Wait for drive to be ready */
     if (ata_wait_bsy() != 0)

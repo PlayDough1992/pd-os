@@ -114,58 +114,12 @@ static int perm_write_ok(const pdfs_dirent_t *de)
     return 0;
 }
 
-/* ---- Journal -------------------------------------------------------------- */
-
-/*
- * Write `sector_buf` to the journal slot, then flush to `target_lba`.
- * The journal sector stores:
- *   [0..15]   pdfs_jrnl_hdr_t  (dirty flag + target_lba)
- *   [16..511] first 496 bytes of the to-be-written sector
- *
- * Since a dir sector is 512 bytes but the journal sector is also 512 bytes,
- * we can't store a full 512-byte sector payload alongside the 16-byte header.
- * Strategy: the journal sector IS the pending sector.  The header is stored
- * in the first 16 bytes, and the remaining 496 bytes are the sector data
- * AFTER offset 16.  We write the actual target sector separately.
- * Simpler alternative (used here): store the pending sector at jrnl_lba
- * and store dirty+target in the superblock reserved[0..1].
- */
-static void jrnl_begin(uint32_t target_lba, const void *sector_buf)
-{
-    /* Mark journal dirty in superblock so we can replay on next mount */
-    g_sb.reserved[0] = 1u;           /* dirty flag                          */
-    g_sb.reserved[1] = target_lba;   /* target                              */
-    ata_write_sectors(g_base_lba, 1, &g_sb);
-    /* Write the pending sector to the journal LBA */
-    ata_write_sectors(g_sb.jrnl_lba, 1, sector_buf);
-}
-
-static void jrnl_commit(void)
-{
-    /* Clear the dirty flag */
-    g_sb.reserved[0] = 0u;
-    g_sb.reserved[1] = 0u;
-    ata_write_sectors(g_base_lba, 1, &g_sb);
-}
-
-static void jrnl_replay(void)
-{
-    if (g_sb.reserved[0] != 1u) return;   /* not dirty */
-    uint32_t target = g_sb.reserved[1];
-    uint8_t  jbuf[512];
-    if (ata_read_sectors(g_sb.jrnl_lba, 1, jbuf) != 0) return;
-    ata_write_sectors(target, 1, jbuf);
-    g_sb.reserved[0] = 0u;
-    g_sb.reserved[1] = 0u;
-    ata_write_sectors(g_base_lba, 1, &g_sb);
-}
-
-/* ---- Directory flush (journal-protected) ---------------------------------- */
+/* ---- Directory flush ------------------------------------------------------ */
 
 /* Number of dirents that fit in one 512-byte sector (64B each = 8). */
 #define DENTS_PER_SEC  (512u / sizeof(pdfs_dirent_t))   /* = 8 */
 
-/* Flush one 512-byte sector (sector_idx) of the directory table at lba. */
+/* Write one directory sector directly to disk. */
 static void flush_dir_sector(const pdfs_dirent_t *dir, uint32_t lba,
                               uint32_t sector_idx)
 {
@@ -173,17 +127,14 @@ static void flush_dir_sector(const pdfs_dirent_t *dir, uint32_t lba,
     pd_memzero(buf, 512);
     pd_memcpy(buf, dir + sector_idx * DENTS_PER_SEC,
               DENTS_PER_SEC * sizeof(pdfs_dirent_t));
-    jrnl_begin(lba + sector_idx, buf);
     ata_write_sectors(lba + sector_idx, 1, buf);
-    jrnl_commit();
 }
 
-/* Flush the entire directory table at `lba` (all PDFS_DIR_SECTORS sectors). */
-static void flush_dir_at(const pdfs_dirent_t *dir, uint32_t lba)
+/* Flush only the one sector that contains dirent `slot` — minimises I/O. */
+static void flush_dir_slot(const pdfs_dirent_t *dir, uint32_t lba,
+                            uint32_t slot)
 {
-    uint32_t i;
-    for (i = 0; i < PDFS_DIR_SECTORS; i++)
-        flush_dir_sector(dir, lba, i);
+    flush_dir_sector(dir, lba, slot / DENTS_PER_SEC);
 }
 
 static void flush_sb(void)
@@ -336,9 +287,6 @@ static int pdfs_mount(uint32_t base_lba)
     if (g_sb.magic != PDFS_MAGIC) return -2;
     if (g_sb.version != PDFS_VERSION) g_ro = 1;
 
-    /* Replay journal before loading directory (v2 only) */
-    if (!g_ro) jrnl_replay();
-
     {
         uint32_t s; uint8_t *p = (uint8_t *)g_dir;
         for (s = 0; s < PDFS_DIR_SECTORS; s++) {
@@ -421,7 +369,7 @@ static int pdfs_write(vfs_node_t *node, uint32_t offset, uint32_t len,
 
     if (len == 0) {
         de->size = 0;
-        flush_dir_at(s_op, dir_lba);
+        flush_dir_slot(s_op, dir_lba, idx);
         if (dir_lba == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
         return 0;
     }
@@ -448,7 +396,7 @@ static int pdfs_write(vfs_node_t *node, uint32_t offset, uint32_t len,
     }
 
     de->size = len;
-    flush_dir_at(s_op, dir_lba);
+    flush_dir_slot(s_op, dir_lba, idx);
     if (dir_lba == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
     return (int)done;
 }
@@ -479,7 +427,7 @@ static int pdfs_create(const char *path)
             s_op[i].mode  = PDFS_MODE_DEFAULT;
             s_op[i].uid   = g_caller ? g_caller->uid : 0u;
             s_op[i].ctime = pit_get_ticks();
-            flush_dir_at(s_op, dir_lba);
+            flush_dir_slot(s_op, dir_lba, i);
             if (dir_lba == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
             return 0;
         }
@@ -504,7 +452,7 @@ static int pdfs_unlink(const char *path)
             pd_strcmp(s_op[i].name, fname) == 0) {
             if (!perm_write_ok(&s_op[i])) return -3;
             pd_memzero(&s_op[i], sizeof(pdfs_dirent_t));
-            flush_dir_at(s_op, dir_lba);
+            flush_dir_slot(s_op, dir_lba, i);
             if (dir_lba == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
             return 0;
         }
@@ -595,7 +543,7 @@ int pdfs_mkdir(const char *path, uint8_t uid, uint8_t gid, uint16_t mode)
             s_op[i].mode          = mode ? mode : PDFS_MODE_DIR_DEF;
             s_op[i].dir_sectors   = PDFS_DIR_SECTORS;
             s_op[i].ctime         = pit_get_ticks();
-            flush_dir_at(s_op, dir_lba);
+            flush_dir_slot(s_op, dir_lba, i);
             if (dir_lba == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
             return 0;
         }
@@ -618,7 +566,7 @@ int pdfs_chmod(const char *path, uint16_t mode)
     if (!perm_write_ok(&s_op[idx])) return -3;
 
     s_op[idx].mode = mode;
-    flush_dir_at(s_op, dir_lba);
+    flush_dir_slot(s_op, dir_lba, (uint32_t)idx);
     if (dir_lba == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
     return 0;
 }
@@ -640,7 +588,7 @@ int pdfs_chown(const char *path, uint8_t uid, uint8_t gid)
 
     s_op[idx2].uid = uid;
     s_op[idx2].gid = gid;
-    flush_dir_at(s_op, dir_lba2);
+    flush_dir_slot(s_op, dir_lba2, (uint32_t)idx2);
     if (dir_lba2 == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
     return 0;
 }
@@ -670,7 +618,11 @@ int pdfs_format(uint32_t base_lba)
 
     /* Write empty root directory (PDFS_DIR_SECTORS × 512 bytes) */
     pd_memzero(g_dir, sizeof(g_dir));
-    flush_dir_at(g_dir, g_sb.dir_lba);
+    {
+        uint32_t s;
+        for (s = 0; s < PDFS_DIR_SECTORS; s++)
+            flush_dir_sector(g_dir, g_sb.dir_lba, s);
+    }
 
     g_base_lba = base_lba;
     g_mounted  = 1;
@@ -708,6 +660,42 @@ int pdfs_stat_root(uint32_t idx, pdfs_dirent_t *out)
     for (i = 0; i < PDFS_MAX_FILES; i++) {
         if (g_dir[i].flags & PDFS_FLAG_USED) {
             if (count == idx) { pd_memcpy(out, &g_dir[i], sizeof(*out)); return 0; }
+            count++;
+        }
+    }
+    return -1;
+}
+
+/*
+ * Fill `out` with the idx-th used entry of the directory at `path`.
+ * For path "/" (or empty), delegates to pdfs_stat_root.
+ * Returns 0 on success, -1 otherwise.
+ */
+int pdfs_stat_dir(const char *path, uint32_t idx, pdfs_dirent_t *out)
+{
+    if (!g_mounted) return -1;
+
+    /* Strip leading '/' — if nothing left it's the root */
+    while (*path == '/') path++;
+    if (*path == '\0') return pdfs_stat_root(idx, out);
+
+    /* Resolve to get the directory dirent in s_op */
+    uint32_t dir_lba;
+    int didx = path_resolve(path, s_op, &dir_lba);
+    if (didx < 0) return -1;
+    if (!(s_op[didx].flags & PDFS_FLAG_DIR)) return -1;
+
+    /* Load the subdir's own table into s_rp (reuse static buffer) */
+    uint32_t sub_lba = s_op[didx].start_lba;
+    if (load_dir(sub_lba, s_rp) != 0) return -1;
+
+    uint32_t count = 0, i;
+    for (i = 0; i < PDFS_MAX_FILES; i++) {
+        if (s_rp[i].flags & PDFS_FLAG_USED) {
+            if (count == idx) {
+                pd_memcpy(out, &s_rp[i], sizeof(*out));
+                return 0;
+            }
             count++;
         }
     }

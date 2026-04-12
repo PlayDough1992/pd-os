@@ -79,6 +79,11 @@ static inline uint8_t inb(uint16_t port)
 
 void keyboard_init(void)
 {
+    /* Drain any stale bytes in the PS/2 output buffer (e.g. 0xAA BAT byte
+     * sent by the keyboard after a system reset).  If left unread, the 8042
+     * will not generate new IRQs for actual keypresses. */
+    while (inb(0x64) & 0x01)
+        (void)inb(KB_DATA_PORT);
     pic_unmask_irq(IRQ_KEYBOARD);
 }
 
