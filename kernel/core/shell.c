@@ -191,6 +191,10 @@ static void cmd_help(int argc, char *argv[])
     kprintf("    reboot           ");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Reboot the system\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    shutdown         ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Shut the system down completely\n");
     kprintf("\n");
 }
 
@@ -280,6 +284,25 @@ static void cmd_logout(int argc, char *argv[])
     g_logout = 1;
 }
 
+static void cmd_shutdown(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    kprintf("  Shutting down...\n");
+    /* ACPI shutdown (QEMU default ACPI PM1a control port) */
+    __asm__ volatile (
+        "cli\n"
+        "outw %w0, %w1\n"   /* QEMU ACPI: port 0x604, value 0x2000 */
+        : : "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604)
+    );
+    /* Fallback: older Bochs/QEMU ISA ACPI port */
+    __asm__ volatile (
+        "outw %w0, %w1\n"
+        : : "a"((uint16_t)0x2000), "Nd"((uint16_t)0xB004)
+    );
+    /* Last resort: halt */
+    __asm__ volatile ("1: hlt\njmp 1b\n");
+}
+
 /* ---- Command table -------------------------------------------------------- */
 
 typedef struct {
@@ -295,9 +318,10 @@ static const command_t commands[] = {
     { "uptime",  cmd_uptime  },
     { "color",   cmd_color   },
     { "whoami",  cmd_whoami  },
-    { "logout",  cmd_logout  },
-    { "reboot",  cmd_reboot  },
-    { NULL,      NULL        }
+    { "logout",   cmd_logout   },
+    { "reboot",   cmd_reboot   },
+    { "shutdown", cmd_shutdown },
+    { NULL,       NULL         }
 };
 
 /* ---- Shell banner --------------------------------------------------------- */
