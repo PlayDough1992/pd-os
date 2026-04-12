@@ -381,19 +381,27 @@ static void cmd_diskinfo(int argc, char *argv[])
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("    LBA   0        Stage 1 bootloader\n");
     kprintf("    LBA   1-5      Stage 2 bootloader\n");
-    kprintf("    LBA   6-68     Kernel image\n");
-    kprintf("    LBA  69+       Available (filesystem)\n\n");
+    kprintf("    LBA   6-133    Kernel image (64 KB window)\n");
+    kprintf("    LBA  200-202   PDFS metadata\n");
+    kprintf("    LBA  203+      PDFS data\n");
+    kprintf("    LBA  2048+     FAT32 volume (/mnt/fat)\n\n");
 }
 
 /* ---- Filesystem helpers --------------------------------------------------- */
 
-/* Build an absolute path from a bare filename: "foo.txt" -> "/foo.txt" */
+/* Build an absolute path from a name.  If name already starts with '/',
+ * use it as-is (absolute path).  Otherwise prepend '/' (PDFS root). */
 static void make_path(char *out, const char *name)
 {
     int i;
-    out[0] = '/';
-    for (i = 0; i < 62 && name[i]; i++) out[i + 1] = name[i];
-    out[i + 1] = '\0';
+    if (name[0] == '/') {
+        for (i = 0; i < 63 && name[i]; i++) out[i] = name[i];
+        out[i] = '\0';
+    } else {
+        out[0] = '/';
+        for (i = 0; i < 62 && name[i]; i++) out[i + 1] = name[i];
+        out[i + 1] = '\0';
+    }
 }
 
 /* Print s padded to `width` spaces (no libc needed). */
@@ -408,12 +416,16 @@ static void sh_pad(const char *s, int width)
 
 static void cmd_ls(int argc, char *argv[])
 {
-    vfs_node_t node;
-    uint32_t   count = 0;
-    (void)argc; (void)argv;
+    vfs_node_t  node;
+    uint32_t    count = 0;
+    const char *path  = (argc >= 2) ? argv[1] : "/";
 
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    kprintf("\n  PDFS  /  (%u KB free)\n", pdfs_free_sectors() / 2u);
+    if (argc < 2) {
+        kprintf("\n  PDFS  /  (%u KB free)\n", pdfs_free_sectors() / 2u);
+    } else {
+        kprintf("\n  %s\n", path);
+    }
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("  ");
     sh_pad("Name", 16);
@@ -421,7 +433,7 @@ static void cmd_ls(int argc, char *argv[])
     kprintf("  ----------------  --------\n");
 
     for (;;) {
-        if (vfs_readdir("/", count, &node) != 0) break;
+        if (vfs_readdir(path, count, &node) != 0) break;
         kprintf("  ");
         vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
         sh_pad(node.name, 16);

@@ -165,33 +165,28 @@ stage2_start:
     call print_color_str
 
     ; ------------------------------------------------------------------
-    ; Load kernel using standard CHS INT 13h (same method Stage 1 uses)
+    ; ------------------------------------------------------------------
+    ; Load kernel using INT 13h Extended Read (AH=42h, LBA mode)
     ; Target: 0x1000:0x0000 = physical 0x10000 (safe low memory)
-    ; kernel will be copied to 0x100000 in protected mode
-    ; Sector 7 = LBA 6.  12 sectors = 6 KB, stays within track 0.
+    ; Kernel will be copied to 0x100000 in protected mode
+    ; Read 128 sectors (64 KB) from LBA 6
     ; ------------------------------------------------------------------
     mov  si, msg_kernel_load
     call print_color_str
 
-    mov  ax, 0x1000
-    mov  es, ax
-    xor  bx, bx             ; ES:BX = 0x1000:0x0000 = physical 0x10000
-    mov  ah, 0x02           ; BIOS: read sectors
-    mov  al, 64             ; 64 sectors = 32 KB
-    mov  ch, 0              ; cylinder 0
-    mov  cl, 7              ; sector 7 = LBA 6
-    mov  dh, 0              ; head 0
+    mov  word  [dap_count],   128    ; 128 sectors = 64 KB
+    mov  word  [dap_offset],  0x0000 ; buffer: 0x1000:0x0000 = physical 0x10000
+    mov  word  [dap_segment], 0x1000
+    mov  dword [dap_lba_lo],  6      ; kernel starts at LBA 6
+    mov  dword [dap_lba_hi],  0
+    mov  ah, 0x42                    ; Extended Read
     mov  dl, [boot_drive]
+    mov  si, dap                     ; DS:SI -> DAP
     int  0x13
     jc   .kernel_err
 
-    ; Restore ES=0 before protected-mode transition
-    xor  ax, ax
-    mov  es, ax
-
     mov  si, msg_kernel_ok
     call print_color_str
-    ; ------------------------------------------------------------------
 
     ; -----------------------------------------------------------------
     ; Probe BIOS memory map (E820) before entering protected mode.
@@ -243,10 +238,10 @@ pm_entry:
     mov  ss, ax
     mov  esp, 0x9FC00           ; kernel stack (below BIOS data area)
 
-    ; Copy kernel: 0x10000 -> 0x100000  (64 sectors = 32768 bytes = 8192 dwords)
+    ; Copy kernel: 0x10000 -> 0x100000  (128 sectors = 65536 bytes = 16384 dwords)
     mov  esi, 0x10000
     mov  edi, 0x100000
-    mov  ecx, 8192
+    mov  ecx, 16384
     rep  movsd
 
     ; Jump to kernel entry point

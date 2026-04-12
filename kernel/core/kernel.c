@@ -19,6 +19,7 @@
 #include "ata.h"
 #include "vfs.h"
 #include "pdfs.h"
+#include "fat32.h"
 
 void kernel_main(void)
 {
@@ -112,19 +113,29 @@ void kernel_main(void)
     }
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
-    kprintf("  (0) Mounting filesystem...");
+    kprintf("  (0) Mounting filesystems...");
     vfs_init();
     vfs_register(pdfs_get_driver());
+    vfs_register(fat32_get_driver());
     {
-        int mret = vfs_mount("/", "pdfs", 69);
-        if (mret == 0) {
+        int pdfs_ok = vfs_mount("/",        "pdfs",  200);
+        int fat_ok  = vfs_mount("/mnt/fat", "fat32", 2048);
+        if (pdfs_ok == 0) {
             vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-            kprintf("  (X) PDFS at / (%u KB free, %u files)\n",
+            kprintf("  (X) PDFS at /  (%u KB free, %u files)\n",
                     pdfs_free_sectors() / 2u,
                     pdfs_file_count());
         } else {
             vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
             kprintf("  (!) PDFS not found  (run 'mkpdfs')\n");
+        }
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        if (fat_ok == 0) {
+            vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            kprintf("  (X) FAT32 at /mnt/fat\n");
+        } else {
+            vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+            kprintf("  (!) FAT32 not found at LBA 2048\n");
         }
     }
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
