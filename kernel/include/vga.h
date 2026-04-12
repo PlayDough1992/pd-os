@@ -45,3 +45,5 @@ void vga_set_cursor(uint8_t x, uint8_t y);
 void vga_scroll_up(int lines);
 void vga_scroll_down(int lines);
 void vga_scroll_reset(void);
+int  vga_get_scroll_count(void);
+void vga_clear_chars(uint8_t start_col, uint8_t start_row, int n);

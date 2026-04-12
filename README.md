@@ -9,7 +9,7 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 - ⚙️ **Custom Bootloader** — No GRUB, we built our own (PD-Bootloader v0.1)
 - 🔧 **Custom Kernel** — Not the Linux kernel, not any existing kernel (PD-Kernel)
 - 🗄️ **Custom Filesystem** — PDFS v2, a native persistent filesystem with subdirs and Unix permissions
-- 💻 **Custom CLI** — PD-Shell with 26 built-in commands, CWD tracking, and multi-user support
+- 💻 **Custom CLI** — PD-Shell with 27 built-in commands, command history, tab completion, live suggestion menu, and multi-user support
 - 🤝 **Community Driven** — Like Linux in spirit, but completely independent in code
 
 **We are hoping the dev communities will reach out to help with this project!** This is an ambitious undertaking to create a truly new operating system from scratch. All contributions, ideas, and collaboration are welcome.
@@ -47,7 +47,9 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 - ✅ ATA/IDE disk driver + Virtual Filesystem Switch (VFS)
 - ✅ Native persistent filesystem (PDFS v2) with subdirs & Unix permissions
 - ✅ Read-only drivers for FAT32, ext2, NTFS
-- ✅ Full CLI shell (PD-Shell) with 26 commands and CWD navigation
+- ✅ Full CLI shell (PD-Shell) with 27 commands and CWD navigation
+- ✅ Command history (↑/↓ navigation, 32-entry ring buffer)
+- ✅ Tab completion (commands + filesystem) and live autocomplete suggestion menu
 - ⬜ Process management and multitasking
 - ⬜ Graphical desktop environment (future)
 
@@ -55,7 +57,7 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 
 ## 📋 Current Status
 
-**Phase 9a — PD-Shell Tier 2 + PDFS v2: COMPLETE ✓**
+**Phase 9b — Shell Quality-of-Life: COMPLETE ✓**
 
 ### Completed
 - ✅ Project directory structure and build system (`build.sh`)
@@ -113,6 +115,7 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 | `setp <file> <octal>` | Set file permissions (e.g. `setp f.txt 644`) |
 | `seto <file> <u>:<g>` | Set file owner (e.g. `seto f.txt pd:pd`) |
 | `elev <command>` | Run a command with elevated (root) privileges |
+| `sudo <command>` | Alias for `elev` — run with elevated privileges |
 | `logout` | Log out and return to the login screen |
 | `reboot` | Reboot the system |
 | `shutdown` | Shut the system down completely |
@@ -230,12 +233,18 @@ E820 memory map parsing, bitmap PMM (4 KB pages), kernel-space paging (identity 
 ### Phase 9a — PD-Shell Tier 2 ✅
 `ls`, `cat`, `write`, `rm`, `mkdir`, `mkpdfs`, `copy`, `move`, `sdir` (cd with `~`/`..`/abs/rel), `setp` (chmod), `seto` (chown), `elev` (elevated privileges), `memmap`, `meminfo`, `heap`, `diskinfo`. CWD session state with `normalize_path()`.
 
-### Phase 9b — Next
-- ⬜ Command history (↑/↓ arrows)
-- ⬜ Tab completion
+### Phase 9b — Shell Quality-of-Life ✅
+- ✅ Command history — 32-entry circular ring, ↑/↓ navigation, duplicate suppression
+- ✅ Tab completion — command names (first token) and filesystem paths (arguments)
+- ✅ Live autocomplete suggestion menu — UP/DOWN to navigate, Space to confirm
+- ✅ Word-wrap in readline — whole words moved to next line at screen edge
+- ✅ Input buffer expanded from 256 → 512 bytes
+- ✅ Scroll anchor tracking — readline anchor stays correct after forced scrolls
+
+### Phase 10 — Next
+- ⬜ Process management (PCBs, context switching, scheduler, ring 3)
 
 ### Future
-- ⬜ Process management (PCBs, context switching, scheduler, ring 3)
 - ⬜ GUI / VESA framebuffer graphics
 - ⬜ Desktop environment
 

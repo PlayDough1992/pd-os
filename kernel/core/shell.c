@@ -36,10 +36,422 @@ static void sh_memset(char *p, char v, int n)
     while (n--) *p++ = v;
 }
 
+/* Forward declarations for helpers used before their definition */
+static void normalize_path(const char *input, char *out);
+static void ww_draw(const char *buf, int count,
+                    uint8_t a_col, uint8_t a_row,
+                    int do_render,
+                    int cursor_idx, uint8_t *out_col, uint8_t *out_row);
+
+/* Command name list for tab-completion of the first token.
+ * Must stay in sync with commands[] and aliases[]. */
+static const char * const cmd_name_list[] = {
+    "help","clear","print","version","uptime","color","whoami",
+    "rammap","raminfo","heapinfo","diskinfo",
+    "list","read","write","delete","format","makedir",
+    "setperm","setowner","goto","copy","move","admin","alias",
+    "logout","reboot","shutdown",
+    /* aliases */
+    "ls","dir","cat","type","rm","del","erase","mkdir","md","cd",
+    "mv","ren","rename","echo","chmod","chown","sudo","runas","cls",
+    "exit","ver",
+    NULL
+};
+
+/* ---- Command history ------------------------------------------------------ */
+
+#define HIST_SIZE  32
+#define SHELL_BUF_SIZE_H 512   /* matches SHELL_BUF_SIZE used below */
+
+static char g_hist[HIST_SIZE][SHELL_BUF_SIZE_H];
+static int  g_hist_count = 0;   /* total entries ever added (unbounded) */
+
+/* Push a non-empty line into the circular history buffer.
+ * Duplicate of the immediately previous entry is silently dropped. */
+static void hist_push(const char *line)
+{
+    if (!line || !line[0]) return;
+
+    /* Drop exact duplicate of previous entry */
+    if (g_hist_count > 0) {
+        int prev = (g_hist_count - 1) % HIST_SIZE;
+        int i;
+        for (i = 0; i < SHELL_BUF_SIZE_H - 1; i++) {
+            if (g_hist[prev][i] != line[i]) goto add;
+            if (!line[i]) return;  /* identical */
+        }
+    }
+add:;
+    int slot = g_hist_count % HIST_SIZE;
+    int i;
+    for (i = 0; i < SHELL_BUF_SIZE_H - 1 && line[i]; i++)
+        g_hist[slot][i] = line[i];
+    g_hist[slot][i] = '\0';
+    g_hist_count++;
+}
+
+/* Retrieve a history entry by logical index (0 = oldest in window).
+ * Returns NULL if idx is out of range. */
+static const char *hist_get(int idx)
+{
+    /* idx is a logical position from oldest (0) to newest (g_hist_count-1) */
+    if (idx < 0 || idx >= g_hist_count) return 0;
+    /* Only HIST_SIZE entries are kept */
+    int oldest = (g_hist_count > HIST_SIZE) ? (g_hist_count - HIST_SIZE) : 0;
+    if (idx < oldest) return 0;
+    return g_hist[idx % HIST_SIZE];
+}
+
+/* ---- Tab completion ------------------------------------------------------- */
+/*
+ * Given what the user has typed so far in buf[0..count-1], find the last
+ * whitespace-delimited token starting at buf[tok_start].  That token is the
+ * completion prefix.  Enumerate g_cwd (or the directory portion of the token
+ * if a path separator is present) and:
+ *   - unique match  → append the rest of the name (+ '/' for dirs)
+ *   - multiple      → print a compact list below the prompt, redraw prompt
+ *   - no match      → do nothing
+ *
+ * buf/count/cursor are updated in place.  anchor_col/anchor_row and
+ * base_scroll are passed by pointer so the caller can track the new anchor
+ * after we print the match list and get a fresh prompt line.
+ */
+#define TAB_MAX_MATCHES 32
+
+static void tab_complete(char *buf, int *count_p, int *cursor_p,
+                         uint8_t *anchor_col_p, uint8_t *anchor_row_p,
+                         int *base_scroll_p)
+{
+    int count = *count_p;
+
+    /* Find start of last token (up to cursor) */
+    int tok_start = *cursor_p;
+    while (tok_start > 0 && buf[tok_start - 1] != ' ') tok_start--;
+
+    /* The prefix to complete is buf[tok_start .. cursor-1] */
+    int pfx_len = *cursor_p - tok_start;
+    char prefix[PDFS_NAME_LEN];
+    if (pfx_len >= (int)PDFS_NAME_LEN) return; /* can't complete */
+    int i;
+    for (i = 0; i < pfx_len; i++) prefix[i] = buf[tok_start + i];
+    prefix[pfx_len] = '\0';
+
+    /* If the prefix contains a '/', resolve the directory part */
+    char scan_dir[128];
+    char name_prefix[PDFS_NAME_LEN];
+    int  slash = -1;
+    for (i = pfx_len - 1; i >= 0; i--) {
+        if (prefix[i] == '/') { slash = i; break; }
+    }
+    if (slash >= 0) {
+        /* Directory part: prefix[0..slash] */
+        char dir_part[128];
+        int dp_len = slash + 1;
+        if (dp_len >= 127) return;
+        for (i = 0; i < dp_len; i++) dir_part[i] = prefix[i];
+        dir_part[dp_len] = '\0';
+        normalize_path(dir_part, scan_dir);
+        /* Name part after slash */
+        int np_len = pfx_len - dp_len;
+        if (np_len >= (int)PDFS_NAME_LEN) return;
+        for (i = 0; i < np_len; i++) name_prefix[i] = prefix[i + dp_len];
+        name_prefix[np_len] = '\0';
+    } else {
+        /* No slash — complete relative to CWD */
+        int ci = 0;
+        while (g_cwd[ci] && ci < 127) { scan_dir[ci] = g_cwd[ci]; ci++; }
+        scan_dir[ci] = '\0';
+        for (i = 0; i < pfx_len; i++) name_prefix[i] = prefix[i];
+        name_prefix[pfx_len] = '\0';
+    }
+
+    int  np_len = 0;
+    while (name_prefix[np_len]) np_len++;
+
+    /* Strip leading '/' for pdfs_stat_dir */
+    const char *dp = scan_dir;
+    while (*dp == '/') dp++;
+
+    /* Collect matches */
+    char matches[TAB_MAX_MATCHES][PDFS_NAME_LEN];
+    uint8_t match_is_dir[TAB_MAX_MATCHES];
+    int match_count = 0;
+
+    /* First token with no path separator: also complete command/alias names */
+    if (tok_start == 0 && slash < 0) {
+        int ci;
+        for (ci = 0; cmd_name_list[ci] && match_count < TAB_MAX_MATCHES; ci++) {
+            const char *cn = cmd_name_list[ci];
+            int match = 1;
+            for (i = 0; i < np_len; i++) {
+                if (cn[i] != name_prefix[i]) { match = 0; break; }
+            }
+            if (!match) continue;
+            int clen = 0;
+            while (cn[clen] && clen < (int)PDFS_NAME_LEN - 1) {
+                matches[match_count][clen] = cn[clen]; clen++;
+            }
+            matches[match_count][clen] = '\0';
+            match_is_dir[match_count] = 0;
+            match_count++;
+        }
+    }
+
+    /* Filesystem matches (arguments / explicit paths) */
+    if (tok_start > 0 || slash >= 0) {
+        for (uint32_t idx = 0; match_count < TAB_MAX_MATCHES; idx++) {
+            pdfs_dirent_t de;
+            if (pdfs_stat_dir(dp, idx, &de) != 0) break;
+            int match = 1;
+            for (i = 0; i < np_len; i++) {
+                if (de.name[i] != name_prefix[i]) { match = 0; break; }
+            }
+            if (!match) continue;
+            for (i = 0; i < (int)PDFS_NAME_LEN; i++) matches[match_count][i] = de.name[i];
+            match_is_dir[match_count] = (de.flags & PDFS_FLAG_DIR) ? 1 : 0;
+            match_count++;
+        }
+    }
+
+    if (match_count == 0) return; /* no match — do nothing */
+
+    if (match_count == 1) {
+        /* Unique match: complete it */
+        const char *m   = matches[0];
+        int         mlen = 0;
+        while (m[mlen]) mlen++;
+
+        /* Suffix = characters after the prefix */
+        int suffix_len = mlen - np_len;
+
+        /* Check there's room in buf */
+        int extra = suffix_len + (match_is_dir[0] ? 1 : 0);
+        if (count + extra >= SHELL_BUF_SIZE - 1) return;
+
+        /* Insert suffix at cursor */
+        /* First make room */
+        for (i = count + extra - 1; i >= *cursor_p + extra; i--)
+            buf[i] = buf[i - extra];
+        /* Write suffix */
+        int wp = *cursor_p;
+        for (i = np_len; i < mlen; i++) buf[wp++] = m[i];
+        if (match_is_dir[0]) buf[wp++] = '/';
+        *cursor_p = wp;
+        count += extra;
+        buf[count] = '\0';
+        *count_p = count;
+
+        /* Redraw */
+        uint8_t cx, cy;
+        vga_clear_chars(*anchor_col_p, *anchor_row_p, count + VGA_WIDTH);
+        ww_draw(buf, count, *anchor_col_p, *anchor_row_p, 1, *cursor_p, &cx, &cy);
+        vga_set_cursor(cx, cy);
+
+    } else {
+        /* Multiple matches: print list below, then redraw prompt */
+        vga_putchar('\n');
+        {
+            int col = 0;
+            int m;
+            for (m = 0; m < match_count; m++) {
+                int mlen = 0;
+                while (matches[m][mlen]) mlen++;
+                int field = mlen + (match_is_dir[m] ? 1 : 0) + 2; /* +2 space gap */
+                if (col > 0 && col + field > VGA_WIDTH) {
+                    vga_putchar('\n');
+                    col = 0;
+                }
+                if (match_is_dir[m])
+                    vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+                else
+                    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+                for (i = 0; i < mlen; i++) vga_putchar(matches[m][i]);
+                if (match_is_dir[m]) vga_putchar('/');
+                vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+                vga_putchar(' ');
+                vga_putchar(' ');
+                col += field;
+            }
+            vga_putchar('\n');
+        }
+
+        /* Reprint prompt */
+        vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        kprintf("%s", g_session_user ? g_session_user->username : "?");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        kprintf("@pd-shell:");
+        vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+        kprintf("%s", g_cwd);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        kprintf("> ");
+
+        /* New anchor */
+        *anchor_col_p  = vga_get_col();
+        *anchor_row_p  = vga_get_row();
+        *base_scroll_p = vga_get_scroll_count();
+
+        /* Redraw current buf */
+        uint8_t cx, cy;
+        ww_draw(buf, count, *anchor_col_p, *anchor_row_p, 1, *cursor_p, &cx, &cy);
+        vga_set_cursor(cx, cy);
+    }
+}
+
+/* ---- Word-wrap aware redraw helper --------------------------------------- */
+/*
+ * Simulate or render buf[0..count-1] with soft word-wrap starting from
+ * screen position (a_col, a_row).  Words (runs of non-space chars) that
+ * would overflow the current line are moved to the next line by padding
+ * with spaces first.  Words longer than VGA_WIDTH hard-wrap as normal.
+ *
+ * do_render : 1 = call vga_putchar for each char, 0 = simulate only
+ * cursor_idx: char index whose visual position should be returned;
+ *             pass -1 to skip
+ * out_col/out_row: receives visual col/row of cursor_idx
+ */
+static void ww_draw(const char *buf, int count,
+                    uint8_t a_col, uint8_t a_row,
+                    int do_render,
+                    int cursor_idx, uint8_t *out_col, uint8_t *out_row)
+{
+    int col = (int)a_col;
+    int row = (int)a_row;
+    int i;
+    if (do_render) vga_set_cursor(a_col, a_row);
+    for (i = 0; i <= count; i++) {
+        /* Soft word-wrap look-ahead */
+        if (i < count && buf[i] != ' ') {
+            int wlen = 0, j = i;
+            while (j < count && buf[j] != ' ') { wlen++; j++; }
+            if (col > 0 && col + wlen > VGA_WIDTH) {
+                if (do_render) {
+                    int k;
+                    for (k = col; k < VGA_WIDTH; k++) vga_putchar(' ');
+                }
+                col = 0;
+                row++;
+            }
+        }
+        /* Record cursor visual position BEFORE rendering char i */
+        if (i == cursor_idx && out_col) {
+            *out_col = (uint8_t)col;
+            *out_row = (uint8_t)row;
+        }
+        if (i == count) break;
+        if (do_render) vga_putchar(buf[i]);
+        col++;
+        if (col >= VGA_WIDTH) { col = 0; row++; }
+    }
+}
+
+/* ---- Suggestion menu helpers ---------------------------------------------- */
+
+#define SUG_MAX 8
+
+/* Draw suggestion menu starting at menu_row; restores cursor to (ret_cx, ret_cy).
+ * Returns number of rows drawn. */
+static int sug_draw_menu(char items[][PDFS_NAME_LEN], int count, int sel,
+                         int menu_row, uint8_t ret_cx, uint8_t ret_cy)
+{
+    int rows = 0, r, j;
+    for (r = 0; r < count && (menu_row + r) < VGA_HEIGHT; r++) {
+        vga_set_cursor(0, (uint8_t)(menu_row + r));
+        if (r == sel)
+            vga_set_color(VGA_COLOR_BLACK, VGA_COLOR_LIGHT_CYAN);
+        else
+            vga_set_color(VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK);
+        vga_putchar(' '); vga_putchar(' ');
+        for (j = 0; items[r][j]; j++) vga_putchar(items[r][j]);
+        for (; j < 22; j++) vga_putchar(' ');
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        rows++;
+    }
+    vga_set_cursor(ret_cx, ret_cy);
+    return rows;
+}
+
+/* Recompute and redraw suggestion menu after buffer change.
+ * Clears old menu, draws new one if >= 2 prefix matches. */
+static void sug_update(char *buf, int count, int cursor,
+                       uint8_t anchor_col, uint8_t anchor_row,
+                       int *sug_active_p, int *sug_sel_p, int *sug_count_p,
+                       char sug_items[][PDFS_NAME_LEN],
+                       int *sug_menu_row_p, int *sug_rows_p)
+{
+    int i;
+    /* Clear existing menu */
+    if (*sug_active_p) {
+        int r;
+        for (r = 0; r < *sug_rows_p; r++) {
+            int row = *sug_menu_row_p + r;
+            if (row >= 0 && row < VGA_HEIGHT)
+                vga_clear_chars(0, (uint8_t)row, VGA_WIDTH);
+        }
+        *sug_active_p = 0;
+        *sug_count_p  = 0;
+        *sug_rows_p   = 0;
+    }
+    /* Only suggest for first token (no space before cursor) */
+    for (i = 0; i < cursor; i++)
+        if (buf[i] == ' ') return;
+    if (cursor <= 0) return;
+
+    /* Prefix = buf[0..cursor-1] */
+    int pfx_len = (cursor < (int)PDFS_NAME_LEN) ? cursor : (int)PDFS_NAME_LEN - 1;
+    char prefix[PDFS_NAME_LEN];
+    for (i = 0; i < pfx_len; i++) prefix[i] = buf[i];
+    prefix[pfx_len] = '\0';
+
+    /* Collect prefix-matching commands (skip exact matches) */
+    int mc = 0;
+    for (i = 0; cmd_name_list[i] && mc < SUG_MAX; i++) {
+        const char *cn = cmd_name_list[i];
+        int m = 1, j;
+        for (j = 0; j < pfx_len; j++) {
+            if (cn[j] != prefix[j]) { m = 0; break; }
+        }
+        if (!m || cn[pfx_len] == '\0') continue;
+        int k;
+        for (k = 0; k < (int)PDFS_NAME_LEN; k++) sug_items[mc][k] = cn[k];
+        mc++;
+    }
+
+    if (mc < 2) return;
+    *sug_count_p = mc;
+
+    /* Menu row: one line below end of rendered input; if no room, go above */
+    uint8_t ex, ey;
+    ww_draw(buf, count, anchor_col, anchor_row, 0, count, &ex, &ey);
+    int menu_row = (int)ey + 1;
+    if (menu_row + mc > VGA_HEIGHT) {
+        /* Try above the prompt instead */
+        menu_row = (int)anchor_row - mc;
+        if (menu_row < 0) {
+            /* Clip: as many rows as fit above prompt */
+            mc = (int)anchor_row;
+            if (mc < 2) return;
+            menu_row = 0;
+            *sug_count_p = mc;
+        }
+    }
+
+    /* Keep selection in bounds */
+    if (*sug_sel_p >= mc) *sug_sel_p = mc - 1;
+
+    *sug_menu_row_p = menu_row;
+    *sug_active_p   = 1;
+
+    /* Draw menu, restore cursor to input cursor pos */
+    uint8_t cx, cy;
+    ww_draw(buf, count, anchor_col, anchor_row, 0, cursor, &cx, &cy);
+    *sug_rows_p = sug_draw_menu(sug_items, mc, *sug_sel_p, menu_row, cx, cy);
+}
+
 /* ---- readline ------------------------------------------------------------- */
 /*
  * Reads one line of input into buf (max len-1 chars + NUL).
- * Handles: printable chars, backspace (bounded to anchor), left/right arrows.
+ * Handles: printable chars, backspace (bounded to anchor), left/right arrows,
+ *          UP/DOWN arrows for history navigation.
  * Returns number of chars in buf (excluding NUL).
  */
 static int readline(char *buf, int len)
@@ -47,9 +459,36 @@ static int readline(char *buf, int len)
     int  count = 0;          /* chars in buffer */
     int  cursor = 0;         /* insertion point within buffer */
 
+    /* History navigation: hist_idx == g_hist_count means "current (unsaved) line" */
+    int  hist_idx = g_hist_count;
+    char hist_saved[SHELL_BUF_SIZE_H];  /* preserves what the user typed before UP */
+    hist_saved[0] = '\0';
+
+    /* Suggestion menu state */
+    int  sug_active   = 0;
+    int  sug_sel      = -1;
+    int  sug_count    = 0;
+    char sug_items[SUG_MAX][PDFS_NAME_LEN];
+    int  sug_menu_row = 0;
+    int  sug_rows     = 0;
+
+/* Close the suggestion menu and blank its rows */
+#define SUG_CLOSE() do { \
+    if (sug_active) { \
+        int _r; \
+        for (_r = 0; _r < sug_rows; _r++) { \
+            int _row = sug_menu_row + _r; \
+            if (_row >= 0 && _row < VGA_HEIGHT) \
+                vga_clear_chars(0, (uint8_t)_row, VGA_WIDTH); \
+        } \
+        sug_active = 0; sug_sel = -1; sug_count = 0; sug_rows = 0; \
+    } \
+} while(0)
+
     /* Anchor: cursor position on screen where input begins */
     uint8_t anchor_col = vga_get_col();
     uint8_t anchor_row = vga_get_row();
+    int     base_scroll = vga_get_scroll_count(); /* detect forced scrolls */
 
     sh_memset(buf, 0, len);
 
@@ -63,11 +502,55 @@ static int readline(char *buf, int len)
         /* Any other key: snap back to live view before processing */
         vga_scroll_reset();
 
+        /* Adjust anchor if the screen has scrolled since last keypress */
+        {
+            int cur_scroll = vga_get_scroll_count();
+            int delta = cur_scroll - base_scroll;
+            if (delta > 0) {
+                anchor_row = (anchor_row >= (uint8_t)delta)
+                             ? (uint8_t)(anchor_row - delta) : 0;
+                base_scroll = cur_scroll;
+            }
+        }
+
         /* --- Enter --- */
         if (c == '\n' || c == '\r') {
+            SUG_CLOSE();
             buf[count] = '\0';
             vga_putchar('\n');
             return count;
+        }
+
+        /* --- Tab: file/dir completion --- */
+        if (c == '\t') {
+            tab_complete(buf, &count, &cursor,
+                         &anchor_col, &anchor_row, &base_scroll);
+            continue;
+        }
+
+        /* --- Space: confirm highlighted suggestion --- */
+        if (c == ' ' && sug_active && sug_sel >= 0) {
+            const char *sel_name = sug_items[sug_sel];
+            int slen = 0, k;
+            while (sel_name[slen]) slen++;
+            /* Build: sel_name + ' ' + buf[cursor..count-1] */
+            char tmp[SHELL_BUF_SIZE];
+            int tp = 0;
+            for (k = 0; k < slen && tp < SHELL_BUF_SIZE - 2; k++) tmp[tp++] = sel_name[k];
+            tmp[tp++] = ' ';
+            for (k = cursor; k < count && tp < SHELL_BUF_SIZE - 1; k++) tmp[tp++] = buf[k];
+            tmp[tp] = '\0';
+            for (k = 0; k <= tp; k++) buf[k] = tmp[k];
+            count  = tp;
+            cursor = slen + 1;
+            SUG_CLOSE();
+            {
+                uint8_t cx, cy;
+                vga_clear_chars(anchor_col, anchor_row, count + VGA_WIDTH);
+                ww_draw(buf, count, anchor_col, anchor_row, 1, cursor, &cx, &cy);
+                vga_set_cursor(cx, cy);
+            }
+            continue;
         }
 
         /* --- Backspace --- */
@@ -80,16 +563,15 @@ static int readline(char *buf, int len)
                 buf[--count] = '\0';
                 cursor--;
 
-                /* Redraw from anchor */
-                vga_set_cursor(anchor_col, anchor_row);
-                int i2;
-                for (i2 = 0; i2 < count; i2++)
-                    vga_putchar(buf[i2]);
-                vga_putchar(' ');   /* erase last ghost char */
-                /* Reposition cursor */
-                uint8_t cx = (uint8_t)((anchor_col + cursor) % VGA_WIDTH);
-                uint8_t cy = (uint8_t)(anchor_row + (anchor_col + cursor) / VGA_WIDTH);
-                vga_set_cursor(cx, cy);
+                {
+                    uint8_t cx, cy;
+                    vga_clear_chars(anchor_col, anchor_row, count + 1 + VGA_WIDTH);
+                    ww_draw(buf, count, anchor_col, anchor_row, 1, cursor, &cx, &cy);
+                    vga_set_cursor(cx, cy);
+                    sug_update(buf, count, cursor, anchor_col, anchor_row,
+                               &sug_active, &sug_sel, &sug_count, sug_items,
+                               &sug_menu_row, &sug_rows);
+                }
             }
             continue;
         }
@@ -98,8 +580,8 @@ static int readline(char *buf, int len)
         if (c == KEY_LEFT) {
             if (cursor > 0) {
                 cursor--;
-                uint8_t cx = (uint8_t)((anchor_col + cursor) % VGA_WIDTH);
-                uint8_t cy = (uint8_t)(anchor_row + (anchor_col + cursor) / VGA_WIDTH);
+                uint8_t cx, cy;
+                ww_draw(buf, count, anchor_col, anchor_row, 0, cursor, &cx, &cy);
                 vga_set_cursor(cx, cy);
             }
             continue;
@@ -109,16 +591,95 @@ static int readline(char *buf, int len)
         if (c == KEY_RIGHT) {
             if (cursor < count) {
                 cursor++;
-                uint8_t cx = (uint8_t)((anchor_col + cursor) % VGA_WIDTH);
-                uint8_t cy = (uint8_t)(anchor_row + (anchor_col + cursor) / VGA_WIDTH);
+                uint8_t cx, cy;
+                ww_draw(buf, count, anchor_col, anchor_row, 0, cursor, &cx, &cy);
                 vga_set_cursor(cx, cy);
             }
             continue;
         }
 
-        /* --- Up/Down: ignore in Tier 1 (no history yet) --- */
-        if (c == KEY_UP || c == KEY_DOWN)
+        /* --- Up arrow: go back in history --- */
+        if (c == KEY_UP) {
+            /* Suggestion menu: navigate up */
+            if (sug_active) {
+                if (sug_sel > -1) sug_sel--;
+                uint8_t cx, cy;
+                ww_draw(buf, count, anchor_col, anchor_row, 0, cursor, &cx, &cy);
+                sug_draw_menu(sug_items, sug_count, sug_sel, sug_menu_row, cx, cy);
+                continue;
+            }
+            int oldest = (g_hist_count > HIST_SIZE) ? (g_hist_count - HIST_SIZE) : 0;
+            if (hist_idx <= oldest) continue;  /* already at oldest */
+
+            /* Save current line the first time we leave it */
+            if (hist_idx == g_hist_count) {
+                int i;
+                for (i = 0; i < count && i < SHELL_BUF_SIZE_H - 1; i++)
+                    hist_saved[i] = buf[i];
+                hist_saved[i] = '\0';
+            }
+
+            hist_idx--;
+            const char *entry = hist_get(hist_idx);
+            if (!entry) continue;
+
+            /* Load entry into buf */
+            int i;
+            for (i = 0; i < len - 1 && entry[i]; i++)
+                buf[i] = entry[i];
+            buf[i] = '\0';
+
+            {
+                int old_count = count;
+                count = 0;
+                for (i = 0; buf[i]; i++) count++;
+                cursor = count;
+                uint8_t cx, cy;
+                vga_clear_chars(anchor_col, anchor_row, old_count + VGA_WIDTH);
+                ww_draw(buf, count, anchor_col, anchor_row, 1, cursor, &cx, &cy);
+                vga_set_cursor(cx, cy);
+            }
             continue;
+        }
+
+        /* --- Down arrow: go forward in history --- */
+        if (c == KEY_DOWN) {
+            /* Suggestion menu: navigate down */
+            if (sug_active) {
+                if (sug_sel < sug_count - 1) sug_sel++;
+                uint8_t cx, cy;
+                ww_draw(buf, count, anchor_col, anchor_row, 0, cursor, &cx, &cy);
+                sug_draw_menu(sug_items, sug_count, sug_sel, sug_menu_row, cx, cy);
+                continue;
+            }
+            if (hist_idx >= g_hist_count) continue;  /* already at current line */
+
+            hist_idx++;
+            const char *entry;
+            if (hist_idx == g_hist_count) {
+                entry = hist_saved;  /* restore what user had typed */
+            } else {
+                entry = hist_get(hist_idx);
+                if (!entry) continue;
+            }
+
+            int i;
+            for (i = 0; i < len - 1 && entry[i]; i++)
+                buf[i] = entry[i];
+            buf[i] = '\0';
+
+            {
+                int old_count = count;
+                count = 0;
+                for (i = 0; buf[i]; i++) count++;
+                cursor = count;
+                uint8_t cx, cy;
+                vga_clear_chars(anchor_col, anchor_row, old_count + VGA_WIDTH);
+                ww_draw(buf, count, anchor_col, anchor_row, 1, cursor, &cx, &cy);
+                vga_set_cursor(cx, cy);
+            }
+            continue;
+        }
 
         /* --- Printable character --- */
         if (count >= len - 1) continue;   /* buffer full */
@@ -130,14 +691,15 @@ static int readline(char *buf, int len)
         buf[cursor++] = c;
         count++;
 
-        /* Redraw from cursor's old position */
-        vga_set_cursor(anchor_col, anchor_row);
-        for (i = 0; i < count; i++)
-            vga_putchar(buf[i]);
-        /* Reposition cursor after inserted char */
-        uint8_t cx = (uint8_t)((anchor_col + cursor) % VGA_WIDTH);
-        uint8_t cy = (uint8_t)(anchor_row + (anchor_col + cursor) / VGA_WIDTH);
-        vga_set_cursor(cx, cy);
+        {
+            uint8_t cx, cy;
+            vga_clear_chars(anchor_col, anchor_row, count - 1 + VGA_WIDTH);
+            ww_draw(buf, count, anchor_col, anchor_row, 1, cursor, &cx, &cy);
+            vga_set_cursor(cx, cy);
+            sug_update(buf, count, cursor, anchor_col, anchor_row,
+                       &sug_active, &sug_sel, &sug_count, sug_items,
+                       &sug_menu_row, &sug_rows);
+        }
     }
 }
 
@@ -1304,6 +1866,7 @@ void shell_run(const user_t *user)
         int n = readline(line, SHELL_BUF_SIZE);
 
         if (n == 0) continue;   /* blank line */
+        hist_push(line);
 
         int argc = tokenize(line, argv, SHELL_MAX_ARGS);
         if (argc == 0) continue;

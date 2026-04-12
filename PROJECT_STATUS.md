@@ -1,9 +1,9 @@
 # PD-OS Project Status
 
 **Last Updated**: April 12, 2026
-**Current Phase**: Phase 9a Complete ✅
+**Current Phase**: Phase 9b Complete ✅
 **Version**: 0.1.0
-**Kernel Size**: 59,104 bytes | Zero warnings
+**Kernel Size**: 68,064 bytes | Zero warnings
 
 ---
 
@@ -28,8 +28,11 @@
 - A20 line enable
 - GDT setup + 32-bit protected mode transition
 - E820 memory map query (passed to kernel via well-known address)
-- INT 13h Extended Read — loads 128 sectors (64 KB) from LBA 6
-- Copies kernel from 0x10000 → 0x100000 (above 1 MB)
+- INT 13h Extended Read — two-chunk load to avoid 64KB DMA boundary:
+  - Read 1: 128 sectors (LBA 6–133) → 0x10000
+  - Read 2: 32 sectors (LBA 134–165) → 0x20000
+  - Total: 160 sectors (80 KB)
+- Copies kernel 0x10000→0x100000 and 0x20000→0x110000 in protected mode
 - TUI boot menu with countdown timer and keyboard selection
 - Jumps to kernel entry point
 
@@ -131,7 +134,40 @@
 
 ---
 
-## 🐛 Notable Bugs Fixed
+### Phase 9b — Shell Quality-of-Life ✓
+
+#### Command History
+- `g_hist[32][512]` circular ring buffer with `hist_push()` / `hist_get()`
+- ↑/↓ arrows navigate history in readline; `hist_saved` preserves partially-typed line
+- Duplicate suppression (same as previous entry silently dropped)
+
+#### Readline Improvements
+- **Scroll anchor tracking** — `g_scroll_count` in VGA driver; per-keypress delta adjusts `anchor_row` when forced scrolls occur so the cursor stays correct
+- **Word-wrap** — `ww_draw()` helper does soft word-wrap look-ahead; entire words moved to next line instead of breaking mid-character at column 79
+- **`vga_clear_chars(col, row, n)`** — erases N chars from the VGA buffer without triggering scroll; used by history nav and backspace redraw
+- **Input buffer** — `SHELL_BUF_SIZE` bumped 256 → 512 bytes
+
+#### Tab Completion
+- TAB key opens `tab_complete()` on the current token
+- First token (no slash): searches `cmd_name_list[]` for prefix matches
+- Argument tokens or tokens with `/`: resolves directory via `normalize_path`, enumerates via `pdfs_stat_dir`
+- Unique match → inserts suffix (dirs get trailing `/`); multiple matches → prints columnar list and redraws
+
+#### Live Suggestion Menu
+- `sug_update()` fires on every printable keypress when editing the first token
+- `sug_draw_menu()` renders up to 8 matching command names below (or above when at the bottom of screen) the input line
+- Selected item: black-on-cyan; unselected: dark-grey on black
+- ↑/↓ arrows navigate menu when active (bypasses history)
+- Space confirms selection: replaces typed prefix with full name + space
+- Any key that closes context (Enter, Backspace to empty, etc.) dismisses menu
+
+---
+
+
+### Kernel Overflowed 64KB Bootloader Load Limit — FIXED (April 12, 2026)
+**Root cause**: Kernel grew to 68,064 bytes but stage2 only loaded 128 sectors (65,536 bytes) from disk. The last ~2.5 KB was never read, so late `.data`/`.bss` sections contained garbage. Login system failed.
+
+**Fix**: Switched to two INT 13h reads (128 sectors → 0x10000, then 32 sectors → 0x20000) to stay within the 64KB DMA page per read. Both chunks copied contiguously to 0x100000 in protected mode.
 
 ### MBR Corruption on Any Disk Write — FIXED (April 12, 2026)
 **Root cause**: `sizeof(pdfs_dirent_t)` was 60 bytes (not 64 as intended). `reserved` was `uint32_t` (4B) instead of `uint32_t[2]` (8B). `g_dir[32]` = 1920 bytes. `pdfs_mount` reads 4 sectors (2048 bytes) into it → 128-byte BSS overflow → `g_base_lba` zeroed → every `flush_sb()` wrote the PDFS superblock to LBA 0 (MBR), destroying the boot signature.
@@ -162,11 +198,11 @@ Phase 6:  ████████████████████ 100% ✅ 
 Phase 7:  ████████████████████ 100% ✅ PMM, paging, heap
 Phase 8:  ████████████████████ 100% ✅ ATA, VFS, PDFS v2, FAT32/ext2/NTFS
 Phase 9a: ████████████████████ 100% ✅ Shell Tier 2 (sdir/copy/move/CWD)
-Phase 9b: ░░░░░░░░░░░░░░░░░░░░   0%  ⬜ History, tab completion
+Phase 9b: ████████████████████ 100% ✅ History, tab completion, suggestion menu
 Phase 10: ░░░░░░░░░░░░░░░░░░░░   0%  ⬜ Process management
 GUI:      ░░░░░░░░░░░░░░░░░░░░   0%  ⬜ VESA + desktop (future)
 
-Overall:  ████████████████░░░░  80%
+Overall:  █████████████████░░░  85%
 ```
 
 ### Component Status
@@ -182,6 +218,10 @@ Overall:  ████████████████░░░░  80%
 | PIC / PIT (100 Hz) | ✅ Complete | 5 |
 | PS/2 keyboard driver | ✅ Complete | 5 |
 | Readline (mid-line edit) | ✅ Complete | 5 |
+| Command history (↑/↓) | ✅ Complete | 9b |
+| Tab completion | ✅ Complete | 9b |
+| Live suggestion menu | ✅ Complete | 9b |
+| Word-wrap in readline | ✅ Complete | 9b |
 | User accounts / login | ✅ Complete | 6 |
 | PD-Shell Tier 1 | ✅ Complete | 6 |
 | E820 memory map | ✅ Complete | 7 |
@@ -194,21 +234,22 @@ Overall:  ████████████████░░░░  80%
 | FAT32 read-only driver | ✅ Complete | 8 |
 | ext2 read-only driver | ✅ Complete | 8 |
 | NTFS read-only driver | ✅ Complete | 8 |
-| PD-Shell Tier 2 (26 cmds) | ✅ Complete | 9a |
+| PD-Shell Tier 2 (27 cmds) | ✅ Complete | 9a |
 | CWD + normalize_path | ✅ Complete | 9a |
 | copy / move commands | ✅ Complete | 9a |
 | setp / seto (chmod/chown) | ✅ Complete | 9a |
-| Command history (↑/↓) | ⬜ Not started | 9b |
-| Tab completion | ⬜ Not started | 9b |
 | Process management | ⬜ Not started | 10 |
 | GUI / VESA framebuffer | ⬜ Not started | Future |
 
 ---
 
-## ⬜ Next Up — Phase 9b
+## ⬜ Next Up — Phase 10
 
-- **Command history** — ring buffer for previous commands, ↑/↓ arrows to navigate (readline already stubs `KEY_UP`/`KEY_DOWN`)
-- **Tab completion** — enumerate `g_cwd` via `pdfs_stat_dir` while typing, complete on unique prefix
+- **Process Control Block (PCB)** — pid, state, register save area, stack pointer, page directory
+- **Context switch** — assembly `task_switch()` saves/restores GPRs + EFLAGS + ESP
+- **Round-robin scheduler** — PIT IRQ triggers preemption
+- **Shell commands** — `ps` (list processes), `kill <pid>`
+- **Ring 3 separation** — TSS, `int 0x80` syscall gate (future)
 
 ---
 

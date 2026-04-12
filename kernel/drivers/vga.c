@@ -20,6 +20,7 @@ static uint16_t g_sb[SB_LINES][VGA_WIDTH];        /* off-screen ring buffer  */
 static int      g_sb_head  = 0;  /* ring write pointer                       */
 static int      g_sb_count = 0;  /* valid entries (0..SB_LINES)              */
 static int      g_sb_off   = 0;  /* viewport offset: 0=live, N=N lines above */
+static int      g_scroll_count = 0; /* total scroll() calls ever             */
 
 static inline uint8_t make_attr(vga_color_t fg, vga_color_t bg)
 {
@@ -132,6 +133,7 @@ static void scroll(void)
         g_screen[VGA_HEIGHT - 1][col] = blank;
 
     vga_row = VGA_HEIGHT - 1;
+    g_scroll_count++;
 
     /* Keep viewport anchored to same content when user is scrolled up */
     if (g_sb_off > 0) {
@@ -195,6 +197,7 @@ void vga_backspace(void)
 
 uint8_t vga_get_col(void) { return vga_col; }
 uint8_t vga_get_row(void) { return vga_row; }
+int     vga_get_scroll_count(void) { return g_scroll_count; }
 
 void vga_cursor_left(void)
 {
@@ -261,5 +264,22 @@ void vga_scroll_reset(void)
     if (g_sb_off != 0) {
         g_sb_off = 0;
         vga_render_viewport();
+    }
+}
+
+/* Clear n characters starting at (start_col, start_row) by writing spaces
+ * directly to the shadow + VGA buffer.  Does NOT call vga_putchar so it
+ * never causes a scroll and never alters vga_col/vga_row. */
+void vga_clear_chars(uint8_t start_col, uint8_t start_row, int n)
+{
+    int pos     = (int)start_row * VGA_WIDTH + (int)start_col;
+    int max_pos = (int)(VGA_HEIGHT * VGA_WIDTH);
+    uint16_t blank = make_entry(' ', vga_attr);
+    int i;
+    for (i = 0; i < n && pos + i < max_pos; i++) {
+        int p = pos + i;
+        g_screen[p / VGA_WIDTH][p % VGA_WIDTH] = blank;
+        if (g_sb_off == 0)
+            VGA_BUFFER[p] = blank;
     }
 }
