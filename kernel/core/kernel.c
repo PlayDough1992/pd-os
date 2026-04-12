@@ -16,6 +16,7 @@
 #include "pmm.h"
 #include "paging.h"
 #include "kheap.h"
+#include "ata.h"
 
 void kernel_main(void)
 {
@@ -91,6 +92,22 @@ void kernel_main(void)
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     kprintf("  (X) %u KB heap ready\n",
             kheap_free_bytes() / 1024u);
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    kprintf("  (0) Probing ATA drives...");
+    ata_init();
+    {
+        const ata_drive_t *drv = ata_get_drive();
+        if (drv->present) {
+            vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            kprintf("  (X) %s (%u KB)\n",
+                    drv->model,
+                    (drv->total_sectors / 2u));
+        } else {
+            vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+            kprintf("  (!) No ATA drive detected\n");
+        }
+    }
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
     /* ---- Enable interrupts ----------------------------------------------- */

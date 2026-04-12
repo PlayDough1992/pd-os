@@ -12,6 +12,7 @@
 #include "e820.h"
 #include "pmm.h"
 #include "kheap.h"
+#include "ata.h"
 
 /* ---- Session state -------------------------------------------------------- */
 
@@ -199,6 +200,10 @@ static void cmd_help(int argc, char *argv[])
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Show kernel heap stats\n");
     vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    diskinfo         ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Show ATA drive info and layout\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     kprintf("    logout           ");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Log out and return to login screen\n");
@@ -330,6 +335,34 @@ static void cmd_heap(int argc, char *argv[])
     kprintf("    Blocks: %u\n\n", blocks);
 }
 
+static void cmd_diskinfo(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    const ata_drive_t *drv = ata_get_drive();
+    vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+    kprintf("\n  ATA Primary Master:\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    if (!drv->present) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("    No drive detected\n\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    kprintf("    Model:    %s\n", drv->model);
+    kprintf("    Sectors:  %u\n", drv->total_sectors);
+    kprintf("    Capacity: %u KB  (%u MB)\n",
+            drv->total_sectors / 2u,
+            drv->total_sectors / 2048u);
+    kprintf("    LBA28:    %s\n", drv->lba_supported ? "yes" : "no");
+    vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+    kprintf("\n  Disk layout:\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("    LBA   0        Stage 1 bootloader\n");
+    kprintf("    LBA   1-5      Stage 2 bootloader\n");
+    kprintf("    LBA   6-68     Kernel image\n");
+    kprintf("    LBA  69+       Available (filesystem)\n\n");
+}
+
 static void cmd_logout(int argc, char *argv[])
 {
     (void)argc; (void)argv;
@@ -374,6 +407,7 @@ static const command_t commands[] = {
     { "memmap",   cmd_memmap   },
     { "meminfo",  cmd_meminfo  },
     { "heap",     cmd_heap     },
+    { "diskinfo", cmd_diskinfo },
     { "logout",   cmd_logout   },
     { "reboot",   cmd_reboot   },
     { "shutdown", cmd_shutdown },
