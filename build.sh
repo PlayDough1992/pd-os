@@ -90,6 +90,7 @@ build() {
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/vfs.c"               -o "$BUILD_DIR/vfs.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/pdfs.c"              -o "$BUILD_DIR/pdfs.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/fat32.c"             -o "$BUILD_DIR/fat32.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/ext2.c"              -o "$BUILD_DIR/ext2.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/shell.c"            -o "$BUILD_DIR/shell.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/kernel.c"          -o "$BUILD_DIR/kernel_main.o"
 
@@ -115,6 +116,7 @@ build() {
         "$BUILD_DIR/vfs.o" \
         "$BUILD_DIR/pdfs.o" \
         "$BUILD_DIR/fat32.o" \
+        "$BUILD_DIR/ext2.o" \
         "$BUILD_DIR/shell.o" \
         "$BUILD_DIR/kernel_main.o" \
         -o "$KERNEL_ELF"
@@ -200,6 +202,141 @@ out = bpb + fsi + bytes((RES-2)*512) + bytes(fat) + bytes(fat) + bytes(SPC*512)
 sys.stdout.buffer.write(out)
 " | dd of="$DISK_IMAGE" conv=notrunc bs=512 seek=2048 2>/dev/null
     echo -e "${GREEN}  [OK] FAT32 ready (LBA 2048-131071, root cluster at LBA 4080)${NC}"
+
+    # --- ext2 at LBA 4096 ---
+    # Volume: 65536 sectors (32 MB), 1 KB blocks, 1 block group
+    # Layout: boot(2) | superblock(2) | BGD(2) | block-bm(2) | inode-bm(2)
+    #         | inode-table(N) | data blocks
+    # inodes_per_group=1024, inode_size=128
+    echo -e "${CYAN}  [8] Formatting ext2 at LBA 4096 (32 MB)...${NC}"
+    python3 - <<'PYEOF'
+import struct, sys
+
+BASE_SECTOR = 4096
+TOTAL_SECTORS = 65536     # 32 MB
+TOTAL_BLOCKS  = TOTAL_SECTORS // 2   # 1 block = 2 sectors = 1024 bytes
+INODES_PER_GROUP = 1024
+INODE_SIZE = 128
+BLOCK_SIZE = 1024
+INODE_TABLE_BLOCKS = (INODES_PER_GROUP * INODE_SIZE) // BLOCK_SIZE  # 128
+# Fixed block assignments (all absolute block numbers, first_data_block=1):
+# block 0 = boot block (unused)
+# block 1 = superblock
+# block 2 = BGD
+# block 3 = block bitmap
+# block 4 = inode bitmap
+# blocks 5..132 = inode table (128 blocks)
+# blocks 133.. = data
+FIRST_DATA_BLOCK = 133
+RESERVED = 10  # reserved blocks count
+FREE_BLOCKS = TOTAL_BLOCKS - FIRST_DATA_BLOCK
+FREE_INODES = INODES_PER_GROUP - 11  # inodes 1-10 reserved by ext2
+
+def pack_sb():
+    sb = bytearray(1024)
+    def w32(off, v): struct.pack_into('<I', sb, off, v)
+    def w16(off, v): struct.pack_into('<H', sb, off, v)
+    w32(0,  INODES_PER_GROUP)   # s_inodes_count
+    w32(4,  TOTAL_BLOCKS)       # s_blocks_count
+    w32(8,  RESERVED)           # s_r_blocks_count
+    w32(12, FREE_BLOCKS)        # s_free_blocks_count
+    w32(16, FREE_INODES)        # s_free_inodes_count
+    w32(20, 1)                  # s_first_data_block
+    w32(24, 0)                  # s_log_block_size (0 = 1 KB)
+    w32(28, 0)                  # s_log_frag_size
+    w32(32, TOTAL_BLOCKS)       # s_blocks_per_group
+    w32(36, TOTAL_BLOCKS)       # s_frags_per_group
+    w32(40, INODES_PER_GROUP)   # s_inodes_per_group
+    w16(54, 0xEF53)             # s_magic
+    w16(56, 1)                  # s_state = clean
+    w16(58, 1)                  # s_errors = continue
+    w32(76, 1)                  # s_rev_level = 1 (dynamic)
+    w32(84, 11)                 # s_first_ino
+    w16(88, INODE_SIZE)         # s_inode_size
+    w16(90, 0)                  # s_block_group_nr
+    sb[72:76] = b'PD-2'        # volume name prefix in last_mounted
+    return bytes(sb)
+
+def pack_bgd():
+    bgd = bytearray(1024)
+    def w32(off, v): struct.pack_into('<I', bgd, off, v)
+    def w16(off, v): struct.pack_into('<H', bgd, off, v)
+    w32(0, 3)                      # bg_block_bitmap = block 3
+    w32(4, 4)                      # bg_inode_bitmap = block 4
+    w32(8, 5)                      # bg_inode_table  = block 5
+    w16(12, FREE_BLOCKS)           # bg_free_blocks_count
+    w16(14, FREE_INODES)           # bg_free_inodes_count
+    w16(16, 1)                     # bg_used_dirs_count (root dir)
+    return bytes(bgd)
+
+def pack_block_bitmap():
+    bm = bytearray(BLOCK_SIZE)
+    # Mark blocks 0..FIRST_DATA_BLOCK-1 as used
+    for i in range(FIRST_DATA_BLOCK):
+        bm[i // 8] |= 1 << (i % 8)
+    return bytes(bm)
+
+def pack_inode_bitmap():
+    bm = bytearray(BLOCK_SIZE)
+    # Inodes 1-10 reserved (bits 0-9), inode 2 = root dir
+    for i in range(11):
+        bm[i // 8] |= 1 << (i % 8)
+    return bytes(bm)
+
+def pack_inode_table():
+    table = bytearray(INODE_TABLE_BLOCKS * BLOCK_SIZE)
+    # Inode 2 = root directory
+    ROOT_OFF = (2 - 1) * INODE_SIZE  # 0-indexed
+    def w32(off, v): struct.pack_into('<I', table, ROOT_OFF + off, v)
+    def w16(off, v): struct.pack_into('<H', table, ROOT_OFF + off, v)
+    w16(0,  0x41ED)    # i_mode: directory, rwxr-xr-x
+    w32(4,  BLOCK_SIZE)# i_size
+    w16(24, 2)         # i_links_count (. and ..)
+    w32(28, 2)         # i_blocks (in 512-byte units)
+    w32(40, FIRST_DATA_BLOCK)  # i_block[0] = first data block
+    return bytes(table)
+
+def pack_root_dir():
+    """Root directory block: . and .. entries only."""
+    blk = bytearray(BLOCK_SIZE)
+    off = 0
+    # Entry: . (inode 2)
+    struct.pack_into('<I', blk, off,    2)       # inode
+    struct.pack_into('<H', blk, off+4,  12)      # rec_len
+    blk[off+6] = 1  # name_len
+    blk[off+7] = 2  # file_type DIR
+    blk[off+8] = ord('.')
+    off += 12
+    # Entry: .. (inode 2 — single group, parent of root is root)
+    struct.pack_into('<I', blk, off,    2)
+    struct.pack_into('<H', blk, off+4,  BLOCK_SIZE - 12)  # rec_len fills rest
+    blk[off+6] = 2  # name_len
+    blk[off+7] = 2  # file_type DIR
+    blk[off+8] = ord('.')
+    blk[off+9] = ord('.')
+    return bytes(blk)
+
+# Assemble: boot block + superblock + BGD + bitmaps + inode table + root dir
+blocks  = bytes(BLOCK_SIZE)       # block 0: boot block
+blocks += pack_sb()               # block 1: superblock
+blocks += pack_bgd()              # block 2: BGD
+blocks += pack_block_bitmap()     # block 3: block bitmap
+blocks += pack_inode_bitmap()     # block 4: inode bitmap
+blocks += pack_inode_table()      # blocks 5-132: inode table
+blocks += pack_root_dir()         # block 133: root dir data
+# Pad to 512-byte sector boundary
+if len(blocks) % 512:
+    blocks += bytes(512 - len(blocks) % 512)
+
+import subprocess
+dd = subprocess.Popen(
+    ['dd', 'of=build/pd-os.img', 'conv=notrunc', 'bs=512',
+     'seek=' + str(BASE_SECTOR)],
+    stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
+)
+dd.communicate(input=blocks)
+PYEOF
+    echo -e "${GREEN}  [OK] ext2 ready (LBA 4096, 32 MB, root inode 2)${NC}"
 }
 
 case "$TARGET" in

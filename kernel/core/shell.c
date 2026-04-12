@@ -383,8 +383,9 @@ static void cmd_diskinfo(int argc, char *argv[])
     kprintf("    LBA   1-5      Stage 2 bootloader\n");
     kprintf("    LBA   6-133    Kernel image (64 KB window)\n");
     kprintf("    LBA  200-202   PDFS metadata\n");
-    kprintf("    LBA  203+      PDFS data\n");
-    kprintf("    LBA  2048+     FAT32 volume (/mnt/fat)\n\n");
+    kprintf("    LBA  203-2047  PDFS data\n");
+    kprintf("    LBA  2048-4095 FAT32 volume (/mnt/fat)\n");
+    kprintf("    LBA  4096+     ext2 volume  (/mnt/ext2)\n\n");
 }
 
 /* ---- Filesystem helpers --------------------------------------------------- */
