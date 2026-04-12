@@ -15,6 +15,7 @@
 #include "ata.h"
 #include "vfs.h"
 #include "pdfs.h"
+#include "process.h"
 
 /* ---- Session state -------------------------------------------------------- */
 
@@ -50,7 +51,7 @@ static const char * const cmd_name_list[] = {
     "rammap","raminfo","heapinfo","diskinfo",
     "list","read","write","delete","format","makedir",
     "setperm","setowner","goto","copy","move","admin","alias",
-    "logout","reboot","shutdown",
+    "logout","reboot","shutdown","ps","kill",
     /* aliases */
     "ls","dir","cat","type","rm","del","erase","mkdir","md","cd",
     "mv","ren","rename","echo","chmod","chown","sudo","runas","cls",
@@ -851,6 +852,8 @@ static void cmd_help(int argc, char *argv[])
     help_row("logout",               "Log out and return to login screen");
     help_row("reboot",               "Reboot the system");
     help_row("shutdown",             "Shut the system down completely");
+    help_row("ps",                   "List running processes");
+    help_row("kill <pid>",           "Terminate a process by PID");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("\n");
 }
@@ -1731,6 +1734,78 @@ static void cmd_alias(int argc, char *argv[])
     kprintf("\n");
 }
 
+/* ---- ps / kill ----------------------------------------------------------- */
+
+static void ps_pad(const char *s, int width)
+{
+    int n = 0;
+    while (s[n] && n < width) { vga_putchar(s[n]); n++; }
+    while (n < width) { vga_putchar(' '); n++; }
+}
+
+static void ps_pad_uint(uint32_t v, int width)
+{
+    char tmp[12];
+    int n = 0, i;
+    if (v == 0) { tmp[n++] = '0'; }
+    else { uint32_t x = v; while (x) { tmp[n++] = '0' + (x % 10); x /= 10; } }
+    /* reverse */
+    for (i = 0; i < n / 2; i++) { char c = tmp[i]; tmp[i] = tmp[n-1-i]; tmp[n-1-i] = c; }
+    tmp[n] = '\0';
+    ps_pad(tmp, width);
+}
+
+static void cmd_ps(int argc, char *argv[])
+{
+    int i;
+    static const char * const state_names[] = {
+        "unused", "runnable", "running", "dead"
+    };
+    (void)argc; (void)argv;
+    vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+    kprintf("  "); ps_pad("PID",   4); ps_pad("STATE",    11);
+                   ps_pad("TICKS", 9); kprintf("NAME\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    for (i = 0; i < PROC_MAX; i++) {
+        pcb_t *p = proc_get_slot(i);
+        if (!p || p->state == PROC_UNUSED) continue;
+        if (p->state == PROC_RUNNING)
+            vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        else if (p->state == PROC_DEAD)
+            vga_set_color(VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK);
+        else
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        kprintf("  ");
+        ps_pad_uint(p->pid,         4);
+        ps_pad(state_names[p->state], 11);
+        ps_pad_uint(p->ticks_total, 9);
+        kprintf("%s\n", p->name);
+    }
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+}
+
+static void cmd_kill(int argc, char *argv[])
+{
+    uint32_t pid;
+    int i;
+    if (argc < 2) {
+        kprintf("  Usage: kill <pid>\n");
+        return;
+    }
+    pid = 0;
+    for (i = 0; argv[1][i] >= '0' && argv[1][i] <= '9'; i++)
+        pid = pid * 10 + (uint32_t)(argv[1][i] - '0');
+    if (proc_kill(pid) == 0) {
+        vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        kprintf("  Process %u terminated.\n", pid);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    } else {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  kill: no such process (pid %u)\n", pid);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    }
+}
+
 /* ---- Command table -------------------------------------------------------- */
 
 typedef struct {
@@ -1766,6 +1841,8 @@ static const command_t commands[] = {
     { "logout",   cmd_logout   },
     { "reboot",   cmd_reboot   },
     { "shutdown", cmd_shutdown },
+    { "ps",       cmd_ps       },
+    { "kill",     cmd_kill     },
     { NULL,       NULL         }
 };
 

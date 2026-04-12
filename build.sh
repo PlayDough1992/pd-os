@@ -71,6 +71,7 @@ build() {
 
     nasm -f elf32 "$KERNEL_DIR/arch/x86/entry.asm" -o "$BUILD_DIR/entry.o"
     nasm -f elf32 "$KERNEL_DIR/arch/x86/idt.asm"   -o "$BUILD_DIR/idt_stubs.o"
+    nasm -f elf32 "$KERNEL_DIR/arch/x86/sched_entry.asm" -o "$BUILD_DIR/sched_entry.o"
 
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/vga.c"          -o "$BUILD_DIR/vga.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/io.c"              -o "$BUILD_DIR/io.o"
@@ -93,12 +94,14 @@ build() {
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/ext2.c"              -o "$BUILD_DIR/ext2.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/ntfs.c"              -o "$BUILD_DIR/ntfs.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/shell.c"            -o "$BUILD_DIR/shell.o"
-    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/kernel.c"          -o "$BUILD_DIR/kernel_main.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/process.c"          -o "$BUILD_DIR/process.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/kernel.c"           -o "$BUILD_DIR/kernel_main.o"
 
     echo -e "${CYAN}  [4] Linking kernel...${NC}"
     $CROSS_LD $LDFLAGS -T "$KERNEL_DIR/linker.ld" \
         "$BUILD_DIR/entry.o" \
         "$BUILD_DIR/idt_stubs.o" \
+        "$BUILD_DIR/sched_entry.o" \
         "$BUILD_DIR/vga.o" \
         "$BUILD_DIR/io.o" \
         "$BUILD_DIR/panic.o" \
@@ -120,6 +123,7 @@ build() {
         "$BUILD_DIR/ext2.o" \
         "$BUILD_DIR/ntfs.o" \
         "$BUILD_DIR/shell.o" \
+        "$BUILD_DIR/process.o" \
         "$BUILD_DIR/kernel_main.o" \
         -o "$KERNEL_ELF"
 

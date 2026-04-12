@@ -22,6 +22,13 @@
 #include "fat32.h"
 #include "ext2.h"
 #include "ntfs.h"
+#include "process.h"
+
+/* Idle task: entered via normal context switch; halts until next IRQ */
+static void idle_task(void)
+{
+    for (;;) __asm__ volatile ("hlt");
+}
 
 void kernel_main(void)
 {
@@ -31,7 +38,7 @@ void kernel_main(void)
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     kprintf("===============================================================================\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("               PD-Kernel  v0.1  -  Phase 6: PD-Shell + Users\n");
+    kprintf("               PD-Kernel  v0.1  -  Phase 10: Process Management\n");
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     kprintf("===============================================================================\n");
 
@@ -166,6 +173,15 @@ void kernel_main(void)
     __asm__ volatile ("sti");
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     kprintf("\n  Interrupts online.\n");
+
+    /* ---- Process manager ------------------------------------------------- */
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("  (0) Initialising process manager...");
+    proc_init();
+    proc_create("idle", idle_task);
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("  (X) Scheduler ready  (%d tasks)\n", proc_count_active());
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
     /* ---- Login + shell loop ---------------------------------------------- */
     /*
