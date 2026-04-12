@@ -91,6 +91,7 @@ build() {
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/pdfs.c"              -o "$BUILD_DIR/pdfs.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/fat32.c"             -o "$BUILD_DIR/fat32.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/ext2.c"              -o "$BUILD_DIR/ext2.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/ntfs.c"              -o "$BUILD_DIR/ntfs.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/shell.c"            -o "$BUILD_DIR/shell.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/kernel.c"          -o "$BUILD_DIR/kernel_main.o"
 
@@ -117,6 +118,7 @@ build() {
         "$BUILD_DIR/pdfs.o" \
         "$BUILD_DIR/fat32.o" \
         "$BUILD_DIR/ext2.o" \
+        "$BUILD_DIR/ntfs.o" \
         "$BUILD_DIR/shell.o" \
         "$BUILD_DIR/kernel_main.o" \
         -o "$KERNEL_ELF"
@@ -337,6 +339,256 @@ dd = subprocess.Popen(
 dd.communicate(input=blocks)
 PYEOF
     echo -e "${GREEN}  [OK] ext2 ready (LBA 4096, 32 MB, root inode 2)${NC}"
+
+    # --- NTFS at LBA 69632 ---
+    # Volume: 16384 sectors (8 MB), cluster=512 B (1 sec/cluster)
+    # MFT at cluster 4 (LBA 69636), 1024-byte records, 6 system records + 1 test file
+    echo -e "${CYAN}  [9] Formatting NTFS at LBA 69632 (8 MB)...${NC}"
+    python3 - <<'NTFSEOF'
+import struct, sys, subprocess
+
+BASE_LBA   = 69632
+TOTAL_SECS = 16384       # 8 MB
+BPS        = 512
+SPC        = 1           # sectors per cluster (1 cluster = 512 bytes)
+MFT_LCN    = 4           # cluster 4 => LBA 69636
+MFT_REC    = 1024        # bytes per MFT record
+MFT_SECS   = MFT_REC // BPS   # 2 sectors per record
+
+def vbr():
+    b = bytearray(512)
+    b[0:3]   = b'\xEB\x52\x90'
+    b[3:11]  = b'NTFS    '
+    struct.pack_into('<H', b, 11, BPS)
+    b[13]    = SPC
+    struct.pack_into('<H', b, 14, 0)   # reserved sectors
+    b[16]    = 0                        # FAT count = 0
+    struct.pack_into('<H', b, 17, 0)
+    struct.pack_into('<H', b, 19, 0)
+    b[21]    = 0xF8
+    struct.pack_into('<H', b, 22, 0)
+    struct.pack_into('<H', b, 24, 63)
+    struct.pack_into('<H', b, 26, 255)
+    struct.pack_into('<I', b, 28, 0)
+    struct.pack_into('<I', b, 32, 0)
+    struct.pack_into('<I', b, 40, 0)
+    # NTFS-specific (offset 40+)
+    struct.pack_into('<Q', b, 40, TOTAL_SECS - 1)
+    struct.pack_into('<Q', b, 48, MFT_LCN)
+    struct.pack_into('<Q', b, 56, MFT_LCN + 1)   # MFTMirr
+    b[64]    = 0xF6   # clusters_per_mft_record = -10 => 2^10 = 1024 bytes
+    b[68]    = 1      # clusters_per_idx_buf
+    struct.pack_into('<Q', b, 72, 0x50445F4E544653)  # volume serial
+    struct.pack_into('<H', b, 510, 0xAA55)
+    return bytes(b)
+
+def fixup(rec, magic):
+    """Apply NTFS update-sequence fixup to a 1024-byte record."""
+    r = bytearray(rec)
+    seq = 0x0001
+    struct.pack_into('<H', r, 0x28, seq)  # update sequence number
+    # fixup array starts at offset 0x2A, 3 entries: [usn, sec0-end, sec1-end]
+    struct.pack_into('<H', r, 0x2A, seq)  # array[0] = usn
+    # save & replace last 2 bytes of each 512-byte sector
+    for i in range(2):
+        off = (i+1)*512 - 2
+        orig_lo = r[off]; orig_hi = r[off+1]
+        struct.pack_into('<H', r, 0x2C + i*2, (orig_hi << 8) | orig_lo)
+        struct.pack_into('<H', r, off, seq)
+    return bytes(r)
+
+def mft_hdr(rec_no, flags, attr_offset, used_size):
+    h = bytearray(48)
+    h[0:4]   = b'FILE'
+    struct.pack_into('<H', h, 4,  0x28)   # update_seq_offset
+    struct.pack_into('<H', h, 6,  3)      # update_seq_count (usn + 2 sectors)
+    struct.pack_into('<Q', h, 8,  0)      # LSN
+    struct.pack_into('<H', h, 16, 1)      # sequence_number
+    struct.pack_into('<H', h, 18, 1)      # link_count
+    struct.pack_into('<H', h, 20, attr_offset)
+    struct.pack_into('<H', h, 22, flags)
+    struct.pack_into('<I', h, 24, used_size)
+    struct.pack_into('<I', h, 28, MFT_REC)
+    struct.pack_into('<Q', h, 32, 0)      # base_record_ref
+    struct.pack_into('<H', h, 40, 0)
+    return bytes(h)
+
+HDR_SZ    = 48   # sizeof mft_hdr output
+ATTR_OFF  = 0x38  # first attribute at offset 56 (leave room for USN array)
+
+def attr_resident(atype, value):
+    """Build a resident attribute record."""
+    name_len    = 0
+    hdr_sz      = 24    # ntfs_attr_resident_t
+    val_off     = hdr_sz
+    val_len     = len(value)
+    total       = hdr_sz + val_len
+    total       = (total + 7) & ~7   # align to 8 bytes
+    a = bytearray(total)
+    struct.pack_into('<I', a, 0,  atype)
+    struct.pack_into('<I', a, 4,  total)
+    a[8]  = 0           # resident
+    a[9]  = name_len
+    struct.pack_into('<H', a, 10, 18)   # name_offset (not used if name_len=0)
+    struct.pack_into('<H', a, 12, 0)    # flags
+    struct.pack_into('<H', a, 14, 0)    # attr_id
+    struct.pack_into('<I', a, 16, val_len)
+    struct.pack_into('<H', a, 20, val_off)
+    struct.pack_into('<H', a, 22, 0)    # resident_flags
+    a[hdr_sz:hdr_sz+val_len] = value
+    return bytes(a)
+
+def attr_end():
+    a = bytearray(8)
+    struct.pack_into('<I', a, 0, 0xFFFFFFFF)
+    struct.pack_into('<I', a, 4, 8)
+    return bytes(a)
+
+def file_name_attr(name, parent_ref=5, namespace=3):
+    """Build a $FILE_NAME attribute value."""
+    utf16 = name.encode('utf-16-le')
+    nlen  = len(name)
+    # Fixed part: 66 bytes (parent_ref + 4 timestamps + alloc/data sizes +
+    #             file_flags + reparse_tag + name_len + namespace)
+    v     = bytearray(66 + len(utf16))
+    struct.pack_into('<Q', v,  0, parent_ref | (1 << 48))  # parent MFT ref
+    # ctime/atime/mtime/rtime at offsets 8,16,24,32 = 0
+    struct.pack_into('<Q', v, 40, 0)   # alloc_size
+    struct.pack_into('<Q', v, 48, 0)   # data_size
+    # file_flags at 56, reparse_tag at 60 = 0
+    v[64]  = nlen
+    v[65]  = namespace
+    v[66:66+len(utf16)] = utf16
+    return bytes(v)
+
+def std_info():
+    return bytes(48)   # all zeros (timestamps, flags = 0)
+
+def build_record(rec_no, flags, attrs):
+    """Assemble a 1024-byte MFT record from a list of (type, value) tuples."""
+    rec = bytearray(MFT_REC)
+    body = bytearray()
+    for (atype, val) in attrs:
+        body += attr_resident(atype, val)
+    body += attr_end()
+    used  = ATTR_OFF + len(body)
+    hdr   = mft_hdr(rec_no, flags, ATTR_OFF, used)
+    rec[0:len(hdr)]         = hdr
+    rec[ATTR_OFF:ATTR_OFF+len(body)] = body
+    # USN fixup placeholder at offset 0x28 (3 entries × 2 bytes)
+    rec[0x28:0x2E] = b'\x00' * 6
+    return fixup(bytes(rec), b'FILE')
+
+# ---- build index entry for root directory $INDEX_ROOT ---
+def index_entry(name, mft_ref):
+    """One $INDEX_ROOT entry for a file named `name` at `mft_ref`."""
+    fn_val = file_name_attr(name, parent_ref=5)
+    key_len = len(fn_val)
+    # entry: ntfs_index_entry_t (16 bytes) + key
+    entry_len = (16 + key_len + 7) & ~7
+    e = bytearray(entry_len)
+    struct.pack_into('<Q', e, 0, mft_ref | (1 << 48))
+    struct.pack_into('<H', e, 8, entry_len)
+    struct.pack_into('<H', e, 10, key_len)
+    struct.pack_into('<I', e, 12, 0)   # flags: not last
+    e[16:16+key_len] = fn_val
+    return bytes(e)
+
+def end_entry():
+    """Last index entry marker."""
+    e = bytearray(16)
+    struct.pack_into('<Q', e, 0, 0)
+    struct.pack_into('<H', e, 8, 16)
+    struct.pack_into('<H', e, 10, 0)
+    struct.pack_into('<I', e, 12, 2)   # NTFS_IDX_ENTRY_END
+    return bytes(e)
+
+def index_root_value(entries_bytes):
+    """Build $INDEX_ROOT value: index_root_t + index_block_hdr_t + entries."""
+    # ntfs_index_root_t: 16 bytes
+    ir = bytearray(16)
+    struct.pack_into('<I', ir, 0, 0x30)  # indexed_attr_type = $FILE_NAME
+    struct.pack_into('<I', ir, 4, 1)     # collation_rule = NTFS_COLLATION_FILE_NAME
+    struct.pack_into('<I', ir, 8, MFT_REC)
+    ir[12] = 1   # clusters_per_block
+    # ntfs_index_block_hdr_t: 16 bytes  (entries_offset relative to ibh start)
+    entries_offset = 16   # entries start right after ibh
+    used = entries_offset + len(entries_bytes)
+    ibh = bytearray(16)
+    struct.pack_into('<I', ibh, 0, entries_offset)
+    struct.pack_into('<I', ibh, 4, used)
+    struct.pack_into('<I', ibh, 8, used)
+    ibh[12] = 0   # flags: no sub-nodes
+    return bytes(ir) + bytes(ibh) + entries_bytes
+
+# ---- Assemble records ------
+
+# MFT record 0: $MFT itself  (minimal — no $DATA runs needed for our driver)
+rec0 = build_record(0, 1, [
+    (0x10, std_info()),
+    (0x30, file_name_attr('$MFT', parent_ref=5)),
+])
+
+# MFT record 1: $MFTMirr
+rec1 = build_record(1, 1, [
+    (0x10, std_info()),
+    (0x30, file_name_attr('$MFTMirr', parent_ref=5)),
+])
+
+# MFT record 2: $LogFile
+rec2 = build_record(2, 1, [
+    (0x10, std_info()),
+    (0x30, file_name_attr('$LogFile', parent_ref=5)),
+])
+
+# MFT record 3: $Volume
+rec3 = build_record(3, 1, [
+    (0x10, std_info()),
+    (0x30, file_name_attr('$Volume', parent_ref=5)),
+])
+
+# MFT record 4: $AttrDef
+rec4 = build_record(4, 1, [
+    (0x10, std_info()),
+    (0x30, file_name_attr('$AttrDef', parent_ref=5)),
+])
+
+# MFT record 6: test file "hello.txt" with resident $DATA
+HELLO_DATA = b'Hello from NTFS!\n'
+rec6 = build_record(6, 1, [
+    (0x10, std_info()),
+    (0x30, file_name_attr('hello.txt', parent_ref=5)),
+    (0x80, HELLO_DATA),
+])
+
+# MFT record 5: root directory with $INDEX_ROOT pointing at record 6
+idx_entries = index_entry('hello.txt', 6) + end_entry()
+irv = index_root_value(idx_entries)
+rec5 = build_record(5, 3, [   # flags=3: IN_USE | IS_DIR
+    (0x10, std_info()),
+    (0x30, file_name_attr('.', parent_ref=5)),
+    (0x90, irv),
+])
+
+# Pack all 7 records (0-6) into MFT, located at cluster MFT_LCN = 4
+mft_data = rec0 + rec1 + rec2 + rec3 + rec4 + rec5 + rec6
+# MFT starts at LBA BASE_LBA + MFT_LCN * SPC
+mft_offset_secs = MFT_LCN * SPC
+
+# Build the full sector buffer: VBR at sec 0, MFT at sec mft_offset_secs
+total_buf = bytearray(TOTAL_SECS * BPS)
+total_buf[0:BPS]            = vbr()
+mft_off   = mft_offset_secs * BPS
+total_buf[mft_off:mft_off + len(mft_data)] = mft_data
+
+dd = subprocess.Popen(
+    ['dd', 'of=build/pd-os.img', 'conv=notrunc', 'bs=512',
+     'seek=' + str(BASE_LBA)],
+    stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
+)
+dd.communicate(input=bytes(total_buf))
+NTFSEOF
+    echo -e "${GREEN}  [OK] NTFS ready (LBA 69632, 8 MB, hello.txt in root)${NC}"
 }
 
 case "$TARGET" in

@@ -436,7 +436,8 @@ static void cmd_diskinfo(int argc, char *argv[])
     kprintf("    LBA  200-202   PDFS metadata\n");
     kprintf("    LBA  203-2047  PDFS data\n");
     kprintf("    LBA  2048-4095 FAT32 volume (/mnt/fat)\n");
-    kprintf("    LBA  4096+     ext2 volume  (/mnt/ext2)\n\n");
+    kprintf("    LBA  4096-69631 ext2 volume  (/mnt/ext2)\n");
+    kprintf("    LBA  69632+    NTFS volume  (/mnt/ntfs, read-only)\n\n");
 }
 
 /* ---- Filesystem helpers --------------------------------------------------- */

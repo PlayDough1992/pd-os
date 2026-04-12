@@ -21,6 +21,7 @@
 #include "pdfs.h"
 #include "fat32.h"
 #include "ext2.h"
+#include "ntfs.h"
 
 void kernel_main(void)
 {
@@ -119,10 +120,12 @@ void kernel_main(void)
     vfs_register(pdfs_get_driver());
     vfs_register(fat32_get_driver());
     vfs_register(ext2_get_driver());
+    vfs_register(ntfs_get_driver());
     {
         int pdfs_ok = vfs_mount("/",         "pdfs",  200);
         int fat_ok  = vfs_mount("/mnt/fat",  "fat32", 2048);
         int ext_ok  = vfs_mount("/mnt/ext2", "ext2",  4096);
+        int ntfs_ok = vfs_mount("/mnt/ntfs", "ntfs",  69632);
         if (pdfs_ok == 0) {
             vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
             kprintf("  (X) PDFS at /  (%u KB free, %u files)\n",
@@ -147,6 +150,14 @@ void kernel_main(void)
         } else {
             vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
             kprintf("  (!) ext2 not found at LBA 4096\n");
+        }
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        if (ntfs_ok == 0) {
+            vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            kprintf("  (X) NTFS at /mnt/ntfs  (read-only)\n");
+        } else {
+            vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+            kprintf("  (!) NTFS not found at LBA 69632\n");
         }
     }
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
