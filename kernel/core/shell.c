@@ -21,6 +21,7 @@
 static const user_t *g_session_user = NULL;
 static int           g_logout       = 0;
 static int           g_elevated     = 0;   /* set during an elev sub-command */
+static char          g_cwd[128]     = "/"; /* current working directory      */
 
 /* ---- String helpers (no libc) ------------------------------------------- */
 
@@ -285,6 +286,18 @@ static void cmd_help(int argc, char *argv[])
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Set file owner (e.g. seto f.txt pd:pd, requires elev)\n");
     vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    sdir [path]      ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Change directory (~, .., /abs, relative)\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    copy <src> <dst> ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Copy a file\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    move <src> <dst> ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Move/rename a file\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     kprintf("    elev <cmd>       ");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Run a command with admin privileges\n");
@@ -454,20 +467,79 @@ static void cmd_diskinfo(int argc, char *argv[])
 
 /* ---- Filesystem helpers --------------------------------------------------- */
 
-/* Build an absolute path from a name.  If name already starts with '/',
- * use it as-is (absolute path).  Otherwise prepend '/' (PDFS root). */
-static void make_path(char *out, const char *name)
+/*
+ * Build a canonical absolute path from `input` against the current `g_cwd`.
+ * Supports:
+ *   /absolute/path     — used directly
+ *   ~                  — expands to /home/<username>
+ *   ~/subdir           — expands to /home/<username>/subdir
+ *   ..                 — walk up one level
+ *   .                  — current directory (no-op)
+ *   relative/name      — appended to g_cwd
+ * Output written into `out` (must be at least 128 bytes).
+ */
+static void normalize_path(const char *input, char *out)
 {
-    int i;
-    if (name[0] == '/') {
-        for (i = 0; i < 63 && name[i]; i++) out[i] = name[i];
-        out[i] = '\0';
+    char buf[128];
+    int  len = 0;
+
+    if (input[0] == '/') {
+        /* Absolute path */
+        buf[len++] = '/';
+        input++;
+    } else if (input[0] == '~') {
+        /* Expand ~ to /home/<username> */
+        const char *u = (g_session_user && g_session_user->username[0])
+                        ? g_session_user->username : "user";
+        buf[len++] = '/';
+        const char *h = "home";
+        while (*h && len < 120) buf[len++] = *h++;
+        buf[len++] = '/';
+        while (*u && len < 120) buf[len++] = *u++;
+        buf[len] = '\0';
+        input++;
+        if (*input == '/') input++;
     } else {
-        out[0] = '/';
-        for (i = 0; i < 62 && name[i]; i++) out[i + 1] = name[i];
-        out[i + 1] = '\0';
+        /* Relative — start from g_cwd */
+        int ci = 0;
+        while (g_cwd[ci] && len < 120) buf[len++] = g_cwd[ci++];
+        buf[len] = '\0';
     }
+
+    /* Process remaining components */
+    while (*input) {
+        while (*input == '/') input++;
+        if (!*input) break;
+
+        /* Extract next component */
+        char comp[32]; int ci = 0;
+        while (*input && *input != '/' && ci < 30) comp[ci++] = *input++;
+        comp[ci] = '\0';
+
+        if (ci == 2 && comp[0] == '.' && comp[1] == '.') {
+            /* Go up — find last '/' */
+            int last = 0, j;
+            for (j = 0; j < len; j++) if (buf[j] == '/') last = j;
+            if (last == 0) { buf[1] = '\0'; len = 1; }
+            else           { buf[last] = '\0'; len = last; }
+        } else if (ci == 1 && comp[0] == '.') {
+            /* Current dir — skip */
+        } else {
+            /* Append /component */
+            if (len == 0 || buf[len - 1] != '/') buf[len++] = '/';
+            int j = 0;
+            while (comp[j] && len < 126) buf[len++] = comp[j++];
+            buf[len] = '\0';
+        }
+    }
+
+    if (len == 0) { buf[0] = '/'; buf[1] = '\0'; len = 1; }
+    int k; for (k = 0; k <= len && k < 127; k++) out[k] = buf[k];
+    out[k] = '\0';
 }
+
+/* Thin wrapper kept for callers that don't need the full normalize_path name. */
+static void make_path(char *out, const char *name) { normalize_path(name, out); }
 
 /* Print s padded to `width` spaces (no libc needed). */
 static void sh_pad(const char *s, int width)
@@ -496,16 +568,23 @@ static void fmt_mode(uint16_t mode, char *buf)
 
 static void cmd_ls(int argc, char *argv[])
 {
-    vfs_node_t  node;
     uint32_t    count = 0;
-    const char *path  = (argc >= 2) ? argv[1] : "/";
+    char        dir_path[128];
+
+    /* Arg or fall back to CWD */
+    if (argc >= 2)
+        normalize_path(argv[1], dir_path);
+    else {
+        int ci = 0;
+        while (g_cwd[ci] && ci < 127) { dir_path[ci] = g_cwd[ci]; ci++; }
+        dir_path[ci] = '\0';
+    }
 
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    if (argc < 2) {
+    if (dir_path[0] == '/' && dir_path[1] == '\0')
         kprintf("\n  PDFS  /  (%u KB free)\n", pdfs_free_sectors() / 2u);
-    } else {
-        kprintf("\n  %s\n", path);
-    }
+    else
+        kprintf("\n  PDFS  %s  (%u KB free)\n", dir_path, pdfs_free_sectors() / 2u);
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("  ");
     sh_pad("Name", 20);
@@ -514,10 +593,13 @@ static void cmd_ls(int argc, char *argv[])
     kprintf("  Uid  Size\n");
     kprintf("  --------------------  ----------  ---  --------\n");
 
+    /* Strip leading '/' for pdfs_stat_dir */
+    const char *dp = dir_path;
+    while (*dp == '/') dp++;
+
     for (;;) {
         pdfs_dirent_t de;
-        if (pdfs_stat_root(count, &de) != 0) break;
-        (void)node;   /* still used below for vfs-routed mounts */
+        if (pdfs_stat_dir(dp, count, &de) != 0) break;
         char mbuf[10];
         fmt_mode(de.mode, mbuf);
         kprintf("  ");
@@ -546,7 +628,7 @@ static void cmd_ls(int argc, char *argv[])
 static void cmd_cat(int argc, char *argv[])
 {
     vfs_node_t node;
-    char path[64];
+    char path[128];
     char *buf;
     int   r, i;
 
@@ -586,7 +668,7 @@ static void cmd_cat(int argc, char *argv[])
 static void cmd_write(int argc, char *argv[])
 {
     vfs_node_t node;
-    char path[64];
+    char path[128];
     char content[256];
     uint32_t clen = 0;
     int i;
@@ -627,7 +709,7 @@ static void cmd_write(int argc, char *argv[])
 
 static void cmd_rm(int argc, char *argv[])
 {
-    char path[64];
+    char path[128];
     if (argc < 2) { kprintf("  Usage: rm <file>\n"); return; }
     make_path(path, argv[1]);
     pdfs_set_context(g_session_user, g_elevated);
@@ -669,7 +751,7 @@ static void cmd_mkpdfs(int argc, char *argv[])
 
 static void cmd_mkdir(int argc, char *argv[])
 {
-    char path[64];
+    char path[128];
     if (argc < 2) { kprintf("  Usage: mkdir <dir>\n"); return; }
     make_path(path, argv[1]);
     pdfs_set_context(g_session_user, g_elevated);
@@ -685,7 +767,7 @@ static void cmd_mkdir(int argc, char *argv[])
 
 static void cmd_setp(int argc, char *argv[])
 {
-    char path[64];
+    char path[128];
     int  mode = 0;
     char *p;
     if (argc < 3) { kprintf("  Usage: setp <file> <octal-mode>\n"); return; }
@@ -718,7 +800,7 @@ static uint8_t resolve_id(const char *token)
 
 static void cmd_seto(int argc, char *argv[])
 {
-    char path[64];
+    char path[128];
     char utoken[32], gtoken[32];
     uint8_t uid, gid;
 
@@ -769,6 +851,180 @@ static void cmd_seto(int argc, char *argv[])
         kprintf("  seto: failed (not found or permission denied)\n");
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     }
+}
+
+static void cmd_sdir(int argc, char *argv[])
+{
+    char target[128];
+
+    /* sdir with no arg goes to ~ (home) */
+    if (argc < 2) {
+        normalize_path("~", target);
+    } else {
+        normalize_path(argv[1], target);
+    }
+
+    /* Root is always valid */
+    if (target[0] == '/' && target[1] == '\0') {
+        g_cwd[0] = '/'; g_cwd[1] = '\0';
+        return;
+    }
+
+    /* Verify the target exists and is a directory */
+    vfs_node_t node;
+    if (vfs_open(target, &node) != 0 || !node.is_dir) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  sdir: '%s': no such directory\n",
+                argc >= 2 ? argv[1] : "~");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    /* Commit */
+    int i = 0;
+    while (target[i] && i < 127) { g_cwd[i] = target[i]; i++; }
+    g_cwd[i] = '\0';
+}
+
+static void cmd_copy(int argc, char *argv[])
+{
+    char src[128], dst[128];
+    vfs_node_t src_node, dst_node;
+    char *buf;
+    int r;
+
+    if (argc < 3) { kprintf("  Usage: copy <src> <dst>\n"); return; }
+
+    normalize_path(argv[1], src);
+    normalize_path(argv[2], dst);
+
+    if (vfs_open(src, &src_node) != 0) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  copy: '%s': not found\n", argv[1]);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    if (src_node.is_dir) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  copy: '%s' is a directory\n", argv[1]);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    pdfs_set_context(g_session_user, g_elevated);
+
+    /* Allocate read buffer */
+    uint32_t sz = src_node.size;
+    if (sz == 0) sz = 1;
+    buf = (char *)kmalloc(sz);
+    if (!buf) { kprintf("  copy: out of memory\n"); return; }
+
+    r = (sz > 1 || src_node.size > 0) ? vfs_read(&src_node, 0, src_node.size, buf) : 0;
+    if (r < 0) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  copy: read error\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        kfree(buf);
+        return;
+    }
+
+    /* Create dst if it doesn't exist */
+    if (vfs_open(dst, &dst_node) != 0) {
+        if (vfs_create(dst) != 0) {
+            vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            kprintf("  copy: cannot create '%s'\n", argv[2]);
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            kfree(buf);
+            return;
+        }
+        vfs_open(dst, &dst_node);
+    }
+
+    if (src_node.size > 0) {
+        if (vfs_write(&dst_node, 0, (uint32_t)r, buf) < 0) {
+            vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            kprintf("  copy: write failed\n");
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            kfree(buf);
+            return;
+        }
+    }
+    kprintf("  Copied %u bytes: '%s' -> '%s'\n", (uint32_t)r, argv[1], argv[2]);
+    kfree(buf);
+}
+
+static void cmd_move(int argc, char *argv[])
+{
+    char src[128], dst[128];
+    vfs_node_t src_node, dst_node;
+    char *buf;
+    int r;
+
+    if (argc < 3) { kprintf("  Usage: move <src> <dst>\n"); return; }
+
+    normalize_path(argv[1], src);
+    normalize_path(argv[2], dst);
+
+    if (vfs_open(src, &src_node) != 0) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  move: '%s': not found\n", argv[1]);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    if (src_node.is_dir) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  move: '%s' is a directory\n", argv[1]);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    pdfs_set_context(g_session_user, g_elevated);
+
+    uint32_t sz = src_node.size;
+    if (sz == 0) sz = 1;
+    buf = (char *)kmalloc(sz);
+    if (!buf) { kprintf("  move: out of memory\n"); return; }
+
+    r = (src_node.size > 0) ? vfs_read(&src_node, 0, src_node.size, buf) : 0;
+    if (r < 0) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  move: read error\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        kfree(buf);
+        return;
+    }
+
+    /* Create dst */
+    if (vfs_open(dst, &dst_node) != 0) {
+        if (vfs_create(dst) != 0) {
+            vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            kprintf("  move: cannot create '%s'\n", argv[2]);
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            kfree(buf);
+            return;
+        }
+        vfs_open(dst, &dst_node);
+    }
+
+    if (src_node.size > 0) {
+        if (vfs_write(&dst_node, 0, (uint32_t)r, buf) < 0) {
+            vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            kprintf("  move: write failed\n");
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            kfree(buf);
+            return;
+        }
+    }
+    kfree(buf);
+
+    /* Remove source */
+    if (vfs_unlink(src) != 0) {
+        vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        kprintf("  move: copied but could not remove source '%s'\n", argv[1]);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    kprintf("  Moved '%s' -> '%s'\n", argv[1], argv[2]);
 }
 
 static void cmd_logout(int argc, char *argv[])
@@ -826,6 +1082,9 @@ static const command_t commands[] = {
     { "mkdir",    cmd_mkdir    },
     { "setp",     cmd_setp     },
     { "seto",     cmd_seto     },
+    { "sdir",     cmd_sdir     },
+    { "copy",     cmd_copy     },
+    { "move",     cmd_move     },
     { "elev",     cmd_elev     },
     { "logout",   cmd_logout   },
     { "reboot",   cmd_reboot   },
@@ -911,15 +1170,20 @@ void shell_run(const user_t *user)
 
     g_session_user = user;
     g_logout       = 0;
+    g_cwd[0] = '/'; g_cwd[1] = '\0';
 
     shell_banner();
 
     for (;;) {
-        /* Prompt: username@pd-shell> */
+        /* Prompt: username@pd-shell:/cwd> */
         vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
         kprintf("%s", user->username);
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-        kprintf("@pd-shell> ");
+        kprintf("@pd-shell:");
+        vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+        kprintf("%s", g_cwd);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        kprintf("> ");
 
         int n = readline(line, SHELL_BUF_SIZE);
 

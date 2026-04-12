@@ -105,7 +105,7 @@ typedef struct {
     uint16_t mode;                /* permission bits (low 9 bits, Unix style)*/
     uint32_t ctime;               /* creation time (PIT ticks)               */
     uint32_t dir_sectors;         /* for dirs: sectors in their dir table    */
-    uint32_t reserved;            /* pad to 64 bytes                         */
+    uint32_t reserved[2];         /* pad to 64 bytes (MUST keep struct = 64B) */
 } __attribute__((packed)) pdfs_dirent_t;
 
 /* ---- Driver + utilities -------------------------------------------------- */
@@ -154,3 +154,10 @@ uint32_t pdfs_file_count(void);
  * Returns 0 on success, -1 when idx is out of range.
  */
 int pdfs_stat_root(uint32_t idx, pdfs_dirent_t *out);
+
+/*
+ * Fill `out` with the idx-th used entry of the directory at `path`.
+ * path "/" or "" lists the root directory (same as pdfs_stat_root).
+ * Returns 0 on success, -1 on failure.
+ */
+int pdfs_stat_dir(const char *path, uint32_t idx, pdfs_dirent_t *out);
