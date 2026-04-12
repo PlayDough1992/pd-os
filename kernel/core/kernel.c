@@ -15,6 +15,7 @@
 #include "e820.h"
 #include "pmm.h"
 #include "paging.h"
+#include "kheap.h"
 
 void kernel_main(void)
 {
@@ -83,6 +84,13 @@ void kernel_main(void)
     paging_init();
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     kprintf("  (X) Identity-mapped 4 MB\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    kprintf("  (0) Initialising kernel heap...");
+    kheap_init();
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("  (X) %u KB heap ready\n",
+            kheap_free_bytes() / 1024u);
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
     /* ---- Enable interrupts ----------------------------------------------- */

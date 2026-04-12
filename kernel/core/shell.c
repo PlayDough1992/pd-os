@@ -11,6 +11,7 @@
 #include "users.h"
 #include "e820.h"
 #include "pmm.h"
+#include "kheap.h"
 
 /* ---- Session state -------------------------------------------------------- */
 
@@ -194,6 +195,10 @@ static void cmd_help(int argc, char *argv[])
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Show memory usage (free/used/total)\n");
     vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("    heap             ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("Show kernel heap stats\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
     kprintf("    logout           ");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("Log out and return to login screen\n");
@@ -309,6 +314,22 @@ static void cmd_meminfo(int argc, char *argv[])
     kprintf("    Total:  %u MB  (%u frames)\n\n", total_mb, pmm_total_frames());
 }
 
+static void cmd_heap(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+    uint32_t free_b  = kheap_free_bytes();
+    uint32_t used_b  = kheap_used_bytes();
+    uint32_t blocks  = kheap_block_count();
+    vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+    kprintf("\n  Kernel heap (0x200000 - 0x2FFFFF, 1 MB pool):\n");
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("    Free:   %u bytes  (%u KB)\n", free_b, free_b / 1024u);
+    vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+    kprintf("    Used:   %u bytes  (%u KB)\n", used_b, used_b / 1024u);
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("    Blocks: %u\n\n", blocks);
+}
+
 static void cmd_logout(int argc, char *argv[])
 {
     (void)argc; (void)argv;
@@ -352,6 +373,7 @@ static const command_t commands[] = {
     { "whoami",   cmd_whoami   },
     { "memmap",   cmd_memmap   },
     { "meminfo",  cmd_meminfo  },
+    { "heap",     cmd_heap     },
     { "logout",   cmd_logout   },
     { "reboot",   cmd_reboot   },
     { "shutdown", cmd_shutdown },

@@ -85,6 +85,7 @@ build() {
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/mm/e820.c"              -o "$BUILD_DIR/e820.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/mm/pmm.c"               -o "$BUILD_DIR/pmm.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/mm/paging.c"            -o "$BUILD_DIR/paging.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/mm/kheap.c"             -o "$BUILD_DIR/kheap.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/shell.c"            -o "$BUILD_DIR/shell.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/kernel.c"          -o "$BUILD_DIR/kernel_main.o"
 
@@ -105,6 +106,7 @@ build() {
         "$BUILD_DIR/e820.o" \
         "$BUILD_DIR/pmm.o" \
         "$BUILD_DIR/paging.o" \
+        "$BUILD_DIR/kheap.o" \
         "$BUILD_DIR/shell.o" \
         "$BUILD_DIR/kernel_main.o" \
         -o "$KERNEL_ELF"
