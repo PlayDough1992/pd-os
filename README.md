@@ -24,11 +24,17 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 ### Login Screen
 ![Login Screen](docs/screenshots/02-login.png)
 
-### PD-Shell with Built-in Commands
+### PD-Shell
 ![PD-Shell](docs/screenshots/03-shell.png)
 
-### PDFS v2 — Persistent Filesystem
-![PDFS Persistence](docs/screenshots/phase8b-pdfs-persistence.png)
+### Built-in Commands — `help` (page 1)
+![Help page 1](docs/screenshots/04-help-1.png)
+
+### Built-in Commands — `help` (page 2)
+![Help page 2](docs/screenshots/05-help-2.png)
+
+### Alias Table — `alias`
+![Alias table](docs/screenshots/06-alias.png)
 
 ---
 
