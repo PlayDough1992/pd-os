@@ -11,6 +11,8 @@
 #define KEY_DOWN  '\x12'
 #define KEY_LEFT  '\x13'
 #define KEY_RIGHT '\x14'
+#define KEY_PGUP  '\x15'
+#define KEY_PGDN  '\x16'
 
 void keyboard_init(void);
 void keyboard_handler(void);

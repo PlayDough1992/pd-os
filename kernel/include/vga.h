@@ -42,3 +42,6 @@ void vga_cursor_up(void);
 void vga_cursor_down(void);
 void vga_puts(const char *s);
 void vga_set_cursor(uint8_t x, uint8_t y);
+void vga_scroll_up(int lines);
+void vga_scroll_down(int lines);
+void vga_scroll_reset(void);
