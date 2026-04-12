@@ -57,7 +57,7 @@ void interrupt_dispatch(interrupt_frame_t *frame)
         /* Hardware IRQ */
         uint8_t irq = (uint8_t)(n - 0x20);
         switch (irq) {
-        case IRQ_TIMER:    pit_handler();      break;
+        /* IRQ_TIMER (0) is handled by irq0_preempt -> sched_irq directly */
         case IRQ_KEYBOARD: keyboard_handler(); break;
         default: break;
         }

@@ -20,6 +20,7 @@ extern void isr24(void); extern void isr25(void); extern void isr26(void);
 extern void isr27(void); extern void isr28(void); extern void isr29(void);
 extern void isr30(void); extern void isr31(void);
 
+extern void irq0_preempt(void);  /* dedicated scheduler IRQ0 stub */
 extern void irq0(void);  extern void irq1(void);  extern void irq2(void);
 extern void irq3(void);  extern void irq4(void);  extern void irq5(void);
 extern void irq6(void);  extern void irq7(void);  extern void irq8(void);
@@ -85,7 +86,8 @@ void idt_init(void)
     idt_set_gate(31, (uint32_t)isr31, 0x08, 0x8E);
 
     /* Hardware IRQs — INT 0x20-0x2F */
-    idt_set_gate(0x20, (uint32_t)irq0,  0x08, 0x8E);
+    /* IRQ0 uses a dedicated stub that handles context switching directly */
+    idt_set_gate(0x20, (uint32_t)irq0_preempt, 0x08, 0x8E);
     idt_set_gate(0x21, (uint32_t)irq1,  0x08, 0x8E);
     idt_set_gate(0x22, (uint32_t)irq2,  0x08, 0x8E);
     idt_set_gate(0x23, (uint32_t)irq3,  0x08, 0x8E);
