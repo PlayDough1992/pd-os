@@ -136,18 +136,30 @@ build() {
     dd if="$KERNEL_BIN"      of="$DISK_IMAGE" conv=notrunc bs=512 seek=6          2>/dev/null
     echo -e "${GREEN}  [OK] Disk image: $DISK_IMAGE (64 MB)${NC}"
 
-    # --- PDFS init at LBA 69 ---
-    # Superblock (512 bytes): magic=PDFS, version=1, dir_lba=70, dir_sectors=2,
-    #                         data_lba=72, next_free_lba=72, then zeros to 512
-    # Directory (1024 bytes): 32 zeroed 32-byte dirents (all free)
-    echo -e "${CYAN}  [6] Initialising PDFS at LBA 200...${NC}"
+    # --- PDFS v2 init at LBA 200 ---
+    # Layout:  LBA 200 = superblock (v2, 8 uint32 fields before reserved[119])
+    #          LBA 201 = journal sector (clean, reserved[0..1]=0)
+    #          LBA 202-205 = root dir (4 sectors, 32×64B dirents, all zeroed)
+    #          LBA 206+ = data
+    # Superblock fields: magic, version, dir_lba, dir_sectors, data_lba,
+    #                    next_free_lba, jrnl_lba   (7 × uint32)
+    # reserved[0..1] used as journal dirty+target → written as 0 here
+    echo -e "${CYAN}  [6] Initialising PDFS v2 at LBA 200...${NC}"
     python3 -c "
 import struct, sys
-sb = struct.pack('<IIIIII', 0x50444653, 1, 201, 2, 203, 203)
-sb += b'\\x00' * (512 - len(sb))
-sys.stdout.buffer.write(sb + b'\\x00' * 1024)
+BASE = 200
+JRNL_LBA = BASE + 1              # 201
+DIR_LBA  = BASE + 2              # 202
+DIR_SECS = 4
+DATA_LBA = DIR_LBA + DIR_SECS   # 206
+# 7 uint32 header fields
+sb = struct.pack('<IIIIIII', 0x50444653, 2, DIR_LBA, DIR_SECS, DATA_LBA, DATA_LBA, JRNL_LBA)
+sb += b'\\x00' * (512 - len(sb))   # pad to 512 bytes (reserved[] all zero)
+journal = b'\\x00' * 512           # clean journal sector
+rootdir = b'\\x00' * (512 * DIR_SECS)  # 4 sectors, all dirents free
+sys.stdout.buffer.write(sb + journal + rootdir)
 " | dd of="$DISK_IMAGE" conv=notrunc bs=512 seek=200 2>/dev/null
-    echo -e "${GREEN}  [OK] PDFS ready  (LBA 200-202, data from LBA 203)${NC}"
+    echo -e "${GREEN}  [OK] PDFS v2 ready  (SB=200 jrnl=201 dir=202-205 data=206+)${NC}"
     # --- FAT32 init at LBA 2048 ---
     # Volume:  129024 sectors (LBA 2048-131071)
     # Layout:  32 reserved | FAT1(1000) | FAT2(1000) | data(127024)
