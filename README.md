@@ -15,6 +15,19 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 
 ---
 
+## 🖥️ Screenshots
+
+### Stage 2 Bootloader — TUI Boot Menu
+![Stage 2 Bootloader](docs/screenshots/01-bootloader.png)
+
+### Login Screen
+![Login Screen](docs/screenshots/02-login.png)
+
+### PD-Shell with Built-in Commands
+![PD-Shell](docs/screenshots/03-shell.png)
+
+---
+
 ## 🎯 Project Goals
 
 - ✅ Custom bootloader (no GRUB dependency)
@@ -62,6 +75,7 @@ PD-OS is **NOT** Linux-based, **NOT** Windows-based, **NOT** Mac-based. This is 
 | `whoami` | Show current user and uid |
 | `logout` | Log out → return to login screen |
 | `reboot` | Reboot the system |
+| `shutdown` | Shut the system down completely |
 
 ### Next Steps (Phase 7)
 - ⬜ Physical memory manager (bitmap allocator)
