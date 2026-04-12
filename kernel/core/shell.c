@@ -1,6 +1,6 @@
-/* ============================================================================
+/* ===============================================================================================
  * PD-Shell  —  Built-in command shell (Tier 1)
- * ============================================================================ */
+ * =============================================================================================== */
 
 #include "shell.h"
 #include "kernel.h"
@@ -55,6 +55,13 @@ static int readline(char *buf, int len)
 
     for (;;) {
         char c = keyboard_getchar();
+
+        /* --- Scroll viewport (don't snap back, just scroll) --- */
+        if (c == KEY_PGUP) { vga_scroll_up(1);   continue; }
+        if (c == KEY_PGDN) { vga_scroll_down(1); continue; }
+
+        /* Any other key: snap back to live view before processing */
+        vga_scroll_reset();
 
         /* --- Enter --- */
         if (c == '\n' || c == '\r') {
@@ -204,115 +211,85 @@ static int tokenize(char *line, char *argv[], int max_args)
 
 /* ---- Built-in commands ---------------------------------------------------- */
 
+/* ---- Help row helper: prints one aligned, word-wrapped help entry --------- */
+#define HELP_CMD_COL  22   /* chars reserved for command+args (after 4-space indent) */
+#define HELP_DESC_COL 28   /* column where descriptions start (4 + 22 + 2 gap)      */
+#define HELP_DESC_W   52   /* available width for description text (80 - 28)         */
+
+static void help_row(const char *cmd, const char *desc)
+{
+    int i;
+    /* Yellow: 4-space indent + command padded to HELP_CMD_COL */
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    for (i = 0; i < 4; i++) vga_putchar(' ');
+    int clen = 0;
+    while (cmd[clen]) { vga_putchar(cmd[clen]); clen++; }
+    for (i = clen; i < HELP_CMD_COL; i++) vga_putchar(' ');
+    vga_putchar(' '); vga_putchar(' ');   /* 2-space gap */
+
+    /* White: description with word wrapping */
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    const char *p = desc;
+    int col = 0;
+    while (*p) {
+        /* Skip inter-word spaces; note whether there was a separator */
+        int had_space = 0;
+        while (*p == ' ') { p++; had_space = 1; }
+        if (!*p) break;
+
+        /* Measure next word */
+        int wlen = 0;
+        while (p[wlen] && p[wlen] != ' ') wlen++;
+
+        /* Wrap if word won't fit on current line */
+        int need = (col == 0) ? wlen : col + 1 + wlen;
+        if (need > HELP_DESC_W && col > 0) {
+            vga_putchar('\n');
+            for (i = 0; i < HELP_DESC_COL; i++) vga_putchar(' ');
+            col = 0;
+        } else if (had_space && col > 0) {
+            vga_putchar(' '); col++;
+        }
+
+        for (i = 0; i < wlen; i++) { vga_putchar(p[i]); col++; }
+        p += wlen;
+    }
+    vga_putchar('\n');
+}
+
 static void cmd_help(int argc, char *argv[])
 {
     (void)argc; (void)argv;
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     kprintf("\n  PD-Shell built-in commands:\n\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    help             ");
+    help_row("help",                 "Show this help message");
+    help_row("clear",                "Clear the screen");
+    help_row("print [text]",         "Print text to the screen");
+    help_row("version",              "Show kernel and shell version");
+    help_row("uptime",               "Show system uptime in seconds");
+    help_row("color [fg] [bg]",      "Set text color (0-15 each)");
+    help_row("whoami",               "Show current user");
+    help_row("rammap",               "Show physical memory map (E820)");
+    help_row("raminfo",              "Show memory usage (free/used/total)");
+    help_row("heapinfo",             "Show kernel heap stats");
+    help_row("diskinfo",             "Show ATA drive info and layout");
+    help_row("list",                 "List files on PDFS");
+    help_row("read <file>",          "Print file contents");
+    help_row("write <f> <text>",     "Create or overwrite a file");
+    help_row("delete <file>",        "Delete a file");
+    help_row("format",               "Format PDFS v2 (requires admin, erases all files)");
+    help_row("makedir <dir>",        "Create a subdirectory");
+    help_row("setperm <f> <oct>",    "Set file permissions (octal mode)");
+    help_row("setowner <f> <u>:<g>", "Set file owner (e.g. setowner f.txt pd:pd, requires admin)");
+    help_row("goto [path]",          "Change directory (~, .., /abs, relative)");
+    help_row("copy <src> <dst>",     "Copy a file");
+    help_row("move <src> <dst>",     "Move or rename a file");
+    help_row("admin <cmd>",          "Run a command with admin privileges");
+    help_row("alias [name]",         "List all aliases, or look up one alias");
+    help_row("logout",               "Log out and return to login screen");
+    help_row("reboot",               "Reboot the system");
+    help_row("shutdown",             "Shut the system down completely");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Show this help message\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    clear            ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Clear the screen\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    echo [text]      ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Print text to the screen\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    version          ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Show kernel and shell version\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    uptime           ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Show system uptime in seconds\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    color [fg] [bg]  ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Set text color (0-15 each)\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    whoami           ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Show current user\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    memmap           ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Show physical memory map (E820)\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    meminfo          ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Show memory usage (free/used/total)\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    heap             ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Show kernel heap stats\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    diskinfo         ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Show ATA drive info and layout\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    ls               ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("List files on PDFS\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    cat <file>       ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Print file contents\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    write <f> <text> ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Create/overwrite a file\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    rm <file>        ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Delete a file\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    mkpdfs           ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Format PDFS v2 (requires elev, erases all files)\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    mkdir <dir>      ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Create a subdirectory\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    setp <f> <oct>   ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Set file permissions (octal mode)\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    seto <f> <u>:<g> ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Set file owner (e.g. seto f.txt pd:pd, requires elev)\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    sdir [path]      ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Change directory (~, .., /abs, relative)\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    copy <src> <dst> ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Copy a file\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    move <src> <dst> ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Move/rename a file\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    elev <cmd>       ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Run a command with admin privileges\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    logout           ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Log out and return to login screen\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    reboot           ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Reboot the system\n");
-    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-    kprintf("    shutdown         ");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("Shut the system down completely\n");
     kprintf("\n");
 }
 
@@ -322,7 +299,7 @@ static void cmd_clear(int argc, char *argv[])
     vga_clear();
 }
 
-static void cmd_echo(int argc, char *argv[])
+static void cmd_print(int argc, char *argv[])
 {
     int i;
     kprintf("  ");
@@ -395,13 +372,13 @@ static void cmd_whoami(int argc, char *argv[])
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 }
 
-static void cmd_memmap(int argc, char *argv[])
+static void cmd_rammap(int argc, char *argv[])
 {
     (void)argc; (void)argv;
     e820_print();
 }
 
-static void cmd_meminfo(int argc, char *argv[])
+static void cmd_raminfo(int argc, char *argv[])
 {
     (void)argc; (void)argv;
     uint32_t free_mb  = (pmm_free_frames()  * PMM_PAGE_SIZE) / (1024u * 1024u);
@@ -417,7 +394,7 @@ static void cmd_meminfo(int argc, char *argv[])
     kprintf("    Total:  %u MB  (%u frames)\n\n", total_mb, pmm_total_frames());
 }
 
-static void cmd_heap(int argc, char *argv[])
+static void cmd_heapinfo(int argc, char *argv[])
 {
     (void)argc; (void)argv;
     uint32_t free_b  = kheap_free_bytes();
@@ -566,7 +543,7 @@ static void fmt_mode(uint16_t mode, char *buf)
     buf[9] = '\0';
 }
 
-static void cmd_ls(int argc, char *argv[])
+static void cmd_list(int argc, char *argv[])
 {
     uint32_t    count = 0;
     char        dir_path[128];
@@ -625,19 +602,19 @@ static void cmd_ls(int argc, char *argv[])
     kprintf("\n");
 }
 
-static void cmd_cat(int argc, char *argv[])
+static void cmd_read(int argc, char *argv[])
 {
     vfs_node_t node;
     char path[128];
     char *buf;
     int   r, i;
 
-    if (argc < 2) { kprintf("  Usage: cat <file>\n"); return; }
+    if (argc < 2) { kprintf("  Usage: read <file>\n"); return; }
 
     make_path(path, argv[1]);
     if (vfs_open(path, &node) != 0) {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        kprintf("  cat: '%s': file not found\n", argv[1]);
+        kprintf("  read: '%s': file not found\n", argv[1]);
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
         return;
     }
@@ -647,11 +624,11 @@ static void cmd_cat(int argc, char *argv[])
     {
         uint32_t to_read = node.size > 4096u ? 4096u : node.size;
         buf = (char *)kmalloc(to_read + 1u);
-        if (!buf) { kprintf("  cat: out of memory\n"); return; }
+        if (!buf) { kprintf("  read: out of memory\n"); return; }
 
         r = vfs_read(&node, 0, to_read, buf);
         if (r < 0) {
-            kprintf("  cat: read error\n");
+            kprintf("  read: read error\n");
             kfree(buf);
             return;
         }
@@ -707,10 +684,10 @@ static void cmd_write(int argc, char *argv[])
     }
 }
 
-static void cmd_rm(int argc, char *argv[])
+static void cmd_delete(int argc, char *argv[])
 {
     char path[128];
-    if (argc < 2) { kprintf("  Usage: rm <file>\n"); return; }
+    if (argc < 2) { kprintf("  Usage: delete <file>\n"); return; }
     make_path(path, argv[1]);
     pdfs_set_context(g_session_user, g_elevated);
     int r = vfs_unlink(path);
@@ -719,20 +696,20 @@ static void cmd_rm(int argc, char *argv[])
     else {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         if (r == -3)
-            kprintf("  rm: '%s': permission denied\n", argv[1]);
+            kprintf("  delete: '%s': permission denied\n", argv[1]);
         else
-            kprintf("  rm: '%s': file not found\n", argv[1]);
+            kprintf("  delete: '%s': file not found\n", argv[1]);
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     }
 }
 
-static void cmd_mkpdfs(int argc, char *argv[])
+static void cmd_format(int argc, char *argv[])
 {
     (void)argc; (void)argv;
     /* Require elevated privileges */
     if (!g_elevated && !(g_session_user && (g_session_user->flags & USER_FLAG_ROOT))) {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        kprintf("  mkpdfs: requires elevated privileges (use elev mkpdfs)\n");
+        kprintf("  format: requires elevated privileges (use admin format)\n");
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
         return;
     }
@@ -749,37 +726,37 @@ static void cmd_mkpdfs(int argc, char *argv[])
     kprintf("  PDFS v2 formatted. Journal ready. All files erased.\n");
 }
 
-static void cmd_mkdir(int argc, char *argv[])
+static void cmd_makedir(int argc, char *argv[])
 {
     char path[128];
-    if (argc < 2) { kprintf("  Usage: mkdir <dir>\n"); return; }
+    if (argc < 2) { kprintf("  Usage: makedir <dir>\n"); return; }
     make_path(path, argv[1]);
     pdfs_set_context(g_session_user, g_elevated);
     uint8_t uid = g_session_user ? g_session_user->uid : 0u;
     if (pdfs_mkdir(path, uid, 0, 0) == 0)
-        kprintf("  mkdir: created '%s'\n", argv[1]);
+        kprintf("  makedir: created '%s'\n", argv[1]);
     else {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        kprintf("  mkdir: failed (exists, full, or read-only)\n");
+        kprintf("  makedir: failed (exists, full, or read-only)\n");
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     }
 }
 
-static void cmd_setp(int argc, char *argv[])
+static void cmd_setperm(int argc, char *argv[])
 {
     char path[128];
     int  mode = 0;
     char *p;
-    if (argc < 3) { kprintf("  Usage: setp <file> <octal-mode>\n"); return; }
+    if (argc < 3) { kprintf("  Usage: setperm <file> <octal-mode>\n"); return; }
     /* Parse octal */
     for (p = argv[2]; *p >= '0' && *p <= '7'; p++) mode = mode * 8 + (*p - '0');
     make_path(path, argv[1]);
     pdfs_set_context(g_session_user, g_elevated);
     if (pdfs_chmod(path, (uint16_t)mode) == 0)
-        kprintf("  setp: mode set to 0%u\n", (uint32_t)mode);
+        kprintf("  setperm: mode set to 0%u\n", (uint32_t)mode);
     else {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        kprintf("  setp: failed (not found or permission denied)\n");
+        kprintf("  setperm: failed (not found or permission denied)\n");
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     }
 }
@@ -798,7 +775,7 @@ static uint8_t resolve_id(const char *token)
     return v;
 }
 
-static void cmd_seto(int argc, char *argv[])
+static void cmd_setowner(int argc, char *argv[])
 {
     char path[128];
     char utoken[32], gtoken[32];
@@ -807,8 +784,8 @@ static void cmd_seto(int argc, char *argv[])
     /* Accept:  seto <file> <user>:<group>
      *      or  seto <file> <user> <group>   */
     if (argc < 3) {
-        kprintf("  Usage: seto <file> <user>:<group>\n");
-        kprintf("  e.g.:  seto file.txt pd:pd\n");
+        kprintf("  Usage: setowner <file> <user>:<group>\n");
+        kprintf("  e.g.:  setowner file.txt pd:pd\n");
         return;
     }
 
@@ -818,7 +795,7 @@ static void cmd_seto(int argc, char *argv[])
         uint32_t i = 0;
         while (colon[i] && colon[i] != ':') i++;
         if (colon[i] != ':') {
-            kprintf("  Usage: seto <file> <user>:<group>\n");
+            kprintf("  Usage: setowner <file> <user>:<group>\n");
             return;
         }
         uint32_t k;
@@ -845,15 +822,15 @@ static void cmd_seto(int argc, char *argv[])
     make_path(path, argv[1]);
     pdfs_set_context(g_session_user, g_elevated);
     if (pdfs_chown(path, uid, gid) == 0)
-        kprintf("  seto: owner set to %s:%s\n", utoken, gtoken);
+        kprintf("  setowner: owner set to %s:%s\n", utoken, gtoken);
     else {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        kprintf("  seto: failed (not found or permission denied)\n");
+        kprintf("  setowner: failed (not found or permission denied)\n");
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     }
 }
 
-static void cmd_sdir(int argc, char *argv[])
+static void cmd_goto(int argc, char *argv[])
 {
     char target[128];
 
@@ -874,7 +851,7 @@ static void cmd_sdir(int argc, char *argv[])
     vfs_node_t node;
     if (vfs_open(target, &node) != 0 || !node.is_dir) {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        kprintf("  sdir: '%s': no such directory\n",
+        kprintf("  goto: '%s': no such directory\n",
                 argc >= 2 ? argv[1] : "~");
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
         return;
@@ -1053,7 +1030,144 @@ static void cmd_shutdown(int argc, char *argv[])
     __asm__ volatile ("1: hlt\njmp 1b\n");
 }
 
-static void cmd_elev(int argc, char *argv[]);   /* defined after commands[] */
+static void cmd_admin(int argc, char *argv[]);   /* defined after commands[] */
+
+/* ---- Alias table ---------------------------------------------------------- */
+
+typedef struct {
+    const char *alias;
+    const char *native;
+} alias_t;
+
+/* Flat table — used by the shell dispatcher */
+static const alias_t aliases[] = {
+    { "ls",     "list"     },
+    { "dir",    "list"     },
+    { "cat",    "read"     },
+    { "type",   "read"     },
+    { "rm",     "delete"   },
+    { "del",    "delete"   },
+    { "erase",  "delete"   },
+    { "mkdir",  "makedir"  },
+    { "md",     "makedir"  },
+    { "cd",     "goto"     },
+    { "mv",     "move"     },
+    { "ren",    "move"     },
+    { "rename", "move"     },
+    { "echo",   "print"    },
+    { "chmod",  "setperm"  },
+    { "chown",  "setowner" },
+    { "sudo",   "admin"    },
+    { "runas",  "admin"    },
+    { "cls",    "clear"    },
+    { "exit",   "logout"   },
+    { "ver",    "version"  },
+    { NULL,     NULL       }
+};
+
+/* Grouped table — used only for display */
+typedef struct {
+    const char *aliases_str;  /* comma-separated aliases */
+    const char *native;
+    const char *desc;
+} alias_group_t;
+
+static const alias_group_t alias_groups[] = {
+    { "ls, dir",         "list",     "List files in the current directory"       },
+    { "cat, type",       "read",     "Print the contents of a file"              },
+    { "rm, del, erase",  "delete",   "Delete a file"                             },
+    { "mkdir, md",       "makedir",  "Create a subdirectory"                     },
+    { "cd",              "goto",     "Change the current directory"              },
+    { "mv, ren, rename", "move",     "Move or rename a file"                     },
+    { "echo",            "print",    "Print text to the screen"                  },
+    { "chmod",           "setperm",  "Set file permissions (octal mode)"         },
+    { "chown",           "setowner", "Set file owner"                            },
+    { "sudo, runas",     "admin",    "Run a command with admin privileges"       },
+    { "cls",             "clear",    "Clear the screen"                          },
+    { "exit",            "logout",   "Log out and return to the login screen"    },
+    { "ver",             "version",  "Show kernel and shell version"             },
+    { NULL,              NULL,       NULL                                         }
+};
+
+/* ---- Alias row: same column geometry as help_row -------------------- */
+#define ALIAS_LEFT_W  28   /* space for "aliases  ->  native" (after 4-space indent) */
+#define ALIAS_DESC_COL 34  /* 4 + 28 + 2-gap */
+#define ALIAS_DESC_W  46   /* 80 - 34 */
+
+static void alias_row(const alias_group_t *g)
+{
+    int i;
+    /* 4-space indent, then yellow aliases */
+    for (i = 0; i < 4; i++) vga_putchar(' ');
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    int left = 0;
+    const char *a = g->aliases_str;
+    while (*a) { vga_putchar(*a); a++; left++; }
+    /* "  ->  " separator */
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("  ->  "); left += 6;
+    /* native in light green */
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    const char *n = g->native;
+    while (*n) { vga_putchar(*n); n++; left++; }
+    /* Pad to ALIAS_LEFT_W then 2-space gap */
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    for (i = left; i < ALIAS_LEFT_W; i++) vga_putchar(' ');
+    vga_putchar(' '); vga_putchar(' ');
+
+    /* Description with word-wrap (same logic as help_row) */
+    const char *p = g->desc;
+    int col = 0;
+    while (*p) {
+        int had_space = 0;
+        while (*p == ' ') { p++; had_space = 1; }
+        if (!*p) break;
+        int wlen = 0;
+        while (p[wlen] && p[wlen] != ' ') wlen++;
+        int need = (col == 0) ? wlen : col + 1 + wlen;
+        if (need > ALIAS_DESC_W && col > 0) {
+            vga_putchar('\n');
+            for (i = 0; i < ALIAS_DESC_COL; i++) vga_putchar(' ');
+            col = 0;
+        } else if (had_space && col > 0) {
+            vga_putchar(' '); col++;
+        }
+        for (i = 0; i < wlen; i++) { vga_putchar(p[i]); col++; }
+        p += wlen;
+    }
+    vga_putchar('\n');
+}
+
+static void cmd_alias(int argc, char *argv[])
+{
+    int i;
+    if (argc >= 2) {
+        /* Look up a single alias */
+        for (i = 0; aliases[i].alias != NULL; i++) {
+            if (sh_strcmp(argv[1], aliases[i].alias) == 0) {
+                vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+                kprintf("  %s", aliases[i].alias);
+                vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+                kprintf("  ->  ");
+                vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+                kprintf("%s\n", aliases[i].native);
+                vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+                return;
+            }
+        }
+        vga_set_color(VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK);
+        kprintf("  '%s' is not an alias\n", argv[1]);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    /* Print formatted table */
+    vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+    kprintf("\n  Aliases (Linux/Windows synonyms for PD-OS commands):\n\n");
+    for (i = 0; alias_groups[i].aliases_str != NULL; i++)
+        alias_row(&alias_groups[i]);
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("\n");
+}
 
 /* ---- Command table -------------------------------------------------------- */
 
@@ -1063,29 +1177,30 @@ typedef struct {
 } command_t;
 
 static const command_t commands[] = {
-    { "help",    cmd_help    },
-    { "clear",   cmd_clear   },
-    { "echo",    cmd_echo    },
-    { "version", cmd_version },
-    { "uptime",  cmd_uptime  },
-    { "color",   cmd_color   },
+    { "help",     cmd_help     },
+    { "clear",    cmd_clear    },
+    { "print",    cmd_print    },
+    { "version",  cmd_version  },
+    { "uptime",   cmd_uptime   },
+    { "color",    cmd_color    },
     { "whoami",   cmd_whoami   },
-    { "memmap",   cmd_memmap   },
-    { "meminfo",  cmd_meminfo  },
-    { "heap",     cmd_heap     },
+    { "rammap",   cmd_rammap   },
+    { "raminfo",  cmd_raminfo  },
+    { "heapinfo", cmd_heapinfo },
     { "diskinfo", cmd_diskinfo },
-    { "ls",       cmd_ls       },
-    { "cat",      cmd_cat      },
+    { "list",     cmd_list     },
+    { "read",     cmd_read     },
     { "write",    cmd_write    },
-    { "rm",       cmd_rm       },
-    { "mkpdfs",   cmd_mkpdfs   },
-    { "mkdir",    cmd_mkdir    },
-    { "setp",     cmd_setp     },
-    { "seto",     cmd_seto     },
-    { "sdir",     cmd_sdir     },
+    { "delete",   cmd_delete   },
+    { "format",   cmd_format   },
+    { "makedir",  cmd_makedir  },
+    { "setperm",  cmd_setperm  },
+    { "setowner", cmd_setowner },
+    { "goto",     cmd_goto     },
     { "copy",     cmd_copy     },
     { "move",     cmd_move     },
-    { "elev",     cmd_elev     },
+    { "admin",    cmd_admin    },
+    { "alias",    cmd_alias    },
     { "logout",   cmd_logout   },
     { "reboot",   cmd_reboot   },
     { "shutdown", cmd_shutdown },
@@ -1094,20 +1209,20 @@ static const command_t commands[] = {
 
 /* ---- elev: privileged command dispatch ------------------------------------ */
 
-static void cmd_elev(int argc, char *argv[])
+static void cmd_admin(int argc, char *argv[])
 {
     char pwd[64];
     int  i, found;
 
     if (argc < 2) {
-        kprintf("  Usage: elev <command> [args...]\n");
+        kprintf("  Usage: admin <command> [args...]\n");
         return;
     }
 
     /* Prevent recursion */
-    if (sh_strcmp(argv[1], "elev") == 0) {
+    if (sh_strcmp(argv[1], "admin") == 0) {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        kprintf("  elev: cannot elevate elev\n");
+        kprintf("  admin: cannot elevate admin\n");
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
         return;
     }
@@ -1115,14 +1230,14 @@ static void cmd_elev(int argc, char *argv[])
     /* Root users skip re-authentication */
     if (!(g_session_user && (g_session_user->flags & USER_FLAG_ROOT))) {
         vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-        kprintf("  [elev] root password: ");
+        kprintf("  [admin] root password: ");
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
         readline_masked(pwd, sizeof(pwd));
 
         if (!users_verify("root", pwd)) {
             sh_memset(pwd, 0, (int)sizeof(pwd));
             vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-            kprintf("  elev: authentication failure\n");
+            kprintf("  admin: authentication failure\n");
             vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
             return;
         }
@@ -1142,7 +1257,7 @@ static void cmd_elev(int argc, char *argv[])
 
     if (!found) {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        kprintf("  elev: unknown command: %s\n", argv[1]);
+        kprintf("  admin: unknown command: %s\n", argv[1]);
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     }
 }
@@ -1152,11 +1267,11 @@ static void cmd_elev(int argc, char *argv[])
 static void shell_banner(void)
 {
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    kprintf("============================================================\n");
+    kprintf("===============================================================================\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("          PD-Shell  v0.1  -  Type 'help' for commands\n");
+    kprintf("               PD-Shell  v0.1  -  Type 'help' for commands\n");
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    kprintf("============================================================\n");
+    kprintf("===============================================================================\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("\n");
 }
@@ -1172,6 +1287,7 @@ void shell_run(const user_t *user)
     g_logout       = 0;
     g_cwd[0] = '/'; g_cwd[1] = '\0';
 
+    vga_clear();
     shell_banner();
 
     for (;;) {
@@ -1200,6 +1316,30 @@ void shell_run(const user_t *user)
                 commands[i].fn(argc, argv);
                 found = 1;
                 break;
+            }
+        }
+
+        if (g_logout) return;
+
+        if (!found) {
+            /* Check alias table */
+            int ai;
+            for (ai = 0; aliases[ai].alias != NULL; ai++) {
+                if (sh_strcmp(argv[0], aliases[ai].alias) == 0) {
+                    /* Print hint then run the native command */
+                    vga_set_color(VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK);
+                    kprintf("  (alias for '%s')\n", aliases[ai].native);
+                    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+                    int ci;
+                    for (ci = 0; commands[ci].name != NULL; ci++) {
+                        if (sh_strcmp(aliases[ai].native, commands[ci].name) == 0) {
+                            commands[ci].fn(argc, argv);
+                            found = 1;
+                            break;
+                        }
+                    }
+                    break;
+                }
             }
         }
 

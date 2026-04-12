@@ -89,11 +89,11 @@ static void login_banner(void)
 {
     vga_clear();
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    kprintf("============================================================\n");
+    kprintf("===============================================================================\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("                     PD-OS  Login\n");
+    kprintf("                              PD-OS  Login\n");
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    kprintf("============================================================\n");
+    kprintf("===============================================================================\n");
     vga_set_color(VGA_COLOR_DARK_GREY, VGA_COLOR_BLACK);
     kprintf("  Default accounts:  root / root   pd / pd\n\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);

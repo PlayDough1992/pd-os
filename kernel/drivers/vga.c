@@ -13,6 +13,14 @@ static uint8_t vga_col  = 0;
 static uint8_t vga_row  = 0;
 static uint8_t vga_attr = 0x07; /* white on black */
 
+/* ---- Scrollback buffer ---------------------------------------------------- */
+#define SB_LINES 200
+static uint16_t g_screen[VGA_HEIGHT][VGA_WIDTH];  /* shadow of live display  */
+static uint16_t g_sb[SB_LINES][VGA_WIDTH];        /* off-screen ring buffer  */
+static int      g_sb_head  = 0;  /* ring write pointer                       */
+static int      g_sb_count = 0;  /* valid entries (0..SB_LINES)              */
+static int      g_sb_off   = 0;  /* viewport offset: 0=live, N=N lines above */
+
 static inline uint8_t make_attr(vga_color_t fg, vga_color_t bg)
 {
     return (uint8_t)((uint8_t)fg | ((uint8_t)bg << 4));
@@ -46,9 +54,15 @@ void vga_init(void)
 void vga_clear(void)
 {
     uint16_t blank = make_entry(' ', vga_attr);
-    uint32_t i;
-    for (i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++)
-        VGA_BUFFER[i] = blank;
+    uint32_t row, col;
+    for (row = 0; row < VGA_HEIGHT; row++)
+        for (col = 0; col < VGA_WIDTH; col++) {
+            VGA_BUFFER[row * VGA_WIDTH + col] = blank;
+            g_screen[row][col] = blank;
+        }
+    g_sb_head  = 0;
+    g_sb_count = 0;
+    g_sb_off   = 0;
     vga_col = 0;
     vga_row = 0;
     hw_cursor_sync();
@@ -59,36 +73,87 @@ void vga_set_color(vga_color_t fg, vga_color_t bg)
     vga_attr = make_attr(fg, bg);
 }
 
+static void vga_render_viewport(void)
+{
+    int      off = g_sb_off;
+    uint32_t row, col;
+
+    for (row = 0; row < VGA_HEIGHT; row++) {
+        uint16_t *dst = (uint16_t *)VGA_BUFFER + row * VGA_WIDTH;
+        if ((int)row < off) {
+            /* From scrollback: row 0 = oldest visible, row (off-1) = most recent */
+            int sb_back = off - 1 - (int)row;  /* 0=most-recent SB line */
+            if (sb_back < g_sb_count) {
+                int idx = ((g_sb_head - 1 - sb_back) % SB_LINES
+                           + SB_LINES) % SB_LINES;
+                for (col = 0; col < VGA_WIDTH; col++)
+                    dst[col] = g_sb[idx][col];
+            } else {
+                uint16_t blank = make_entry(' ', 0x07);
+                for (col = 0; col < VGA_WIDTH; col++)
+                    dst[col] = blank;
+            }
+        } else {
+            /* From live screen */
+            int sr = (int)row - off;
+            for (col = 0; col < VGA_WIDTH; col++)
+                dst[col] = g_screen[sr][col];
+        }
+    }
+
+    if (off == 0) {
+        hw_cursor_sync();
+    } else {
+        /* Move hardware cursor off visible area to hide it */
+        uint16_t pos = (uint16_t)(VGA_HEIGHT * VGA_WIDTH);
+        outb(0x3D4, 0x0F); outb(0x3D5, (uint8_t)(pos & 0xFF));
+        outb(0x3D4, 0x0E); outb(0x3D5, (uint8_t)(pos >> 8));
+    }
+}
+
 static void scroll(void)
 {
     uint16_t blank = make_entry(' ', vga_attr);
     uint32_t row, col;
 
-    /* Shift rows 1..24 up to 0..23 */
+    /* Save the row about to scroll off into the scrollback ring */
+    for (col = 0; col < VGA_WIDTH; col++)
+        g_sb[g_sb_head][col] = g_screen[0][col];
+    g_sb_head = (g_sb_head + 1) % SB_LINES;
+    if (g_sb_count < SB_LINES) g_sb_count++;
+
+    /* Shift g_screen up by one row */
     for (row = 1; row < VGA_HEIGHT; row++)
         for (col = 0; col < VGA_WIDTH; col++)
-            VGA_BUFFER[(row - 1) * VGA_WIDTH + col] =
-                VGA_BUFFER[row * VGA_WIDTH + col];
+            g_screen[row - 1][col] = g_screen[row][col];
 
-    /* Clear last row */
+    /* Clear the new last row */
     for (col = 0; col < VGA_WIDTH; col++)
-        VGA_BUFFER[(VGA_HEIGHT - 1) * VGA_WIDTH + col] = blank;
+        g_screen[VGA_HEIGHT - 1][col] = blank;
 
     vga_row = VGA_HEIGHT - 1;
-    hw_cursor_sync();
+
+    /* Keep viewport anchored to same content when user is scrolled up */
+    if (g_sb_off > 0) {
+        g_sb_off++;
+        if (g_sb_off > g_sb_count) g_sb_off = g_sb_count;
+    }
+
+    vga_render_viewport();
 }
 
 void vga_putchar(char c)
 {
+    uint16_t entry;
     if (c == '\n') {
         vga_col = 0;
-        if (++vga_row >= VGA_HEIGHT) scroll();
-        hw_cursor_sync();
+        if (++vga_row >= VGA_HEIGHT) scroll(); /* scroll() redraws + syncs */
+        else if (g_sb_off == 0) hw_cursor_sync();
         return;
     }
     if (c == '\r') {
         vga_col = 0;
-        hw_cursor_sync();
+        if (g_sb_off == 0) hw_cursor_sync();
         return;
     }
     if (c == '\t') {
@@ -97,16 +162,18 @@ void vga_putchar(char c)
             vga_col = 0;
             if (++vga_row >= VGA_HEIGHT) scroll();
         }
-        hw_cursor_sync();
+        if (g_sb_off == 0) hw_cursor_sync();
         return;
     }
-
-    VGA_BUFFER[vga_row * VGA_WIDTH + vga_col] = make_entry(c, vga_attr);
+    entry = make_entry(c, vga_attr);
+    g_screen[vga_row][vga_col] = entry;
+    if (g_sb_off == 0)
+        VGA_BUFFER[vga_row * VGA_WIDTH + vga_col] = entry;
     if (++vga_col >= VGA_WIDTH) {
         vga_col = 0;
         if (++vga_row >= VGA_HEIGHT) scroll();
     }
-    hw_cursor_sync();
+    if (g_sb_off == 0) hw_cursor_sync();
 }
 
 void vga_backspace(void)
@@ -119,7 +186,10 @@ void vga_backspace(void)
     } else {
         return;  /* already at top-left */
     }
-    VGA_BUFFER[vga_row * VGA_WIDTH + vga_col] = make_entry(' ', vga_attr);
+    uint16_t blank = make_entry(' ', vga_attr);
+    g_screen[vga_row][vga_col] = blank;
+    if (g_sb_off == 0)
+        VGA_BUFFER[vga_row * VGA_WIDTH + vga_col] = blank;
     hw_cursor_sync();
 }
 
@@ -170,4 +240,26 @@ void vga_set_cursor(uint8_t x, uint8_t y)
     vga_col = x;
     vga_row = y;
     hw_cursor_sync();
+}
+
+void vga_scroll_up(int lines)
+{
+    g_sb_off += lines;
+    if (g_sb_off > g_sb_count) g_sb_off = g_sb_count;
+    vga_render_viewport();
+}
+
+void vga_scroll_down(int lines)
+{
+    g_sb_off -= lines;
+    if (g_sb_off < 0) g_sb_off = 0;
+    vga_render_viewport();
+}
+
+void vga_scroll_reset(void)
+{
+    if (g_sb_off != 0) {
+        g_sb_off = 0;
+        vga_render_viewport();
+    }
 }

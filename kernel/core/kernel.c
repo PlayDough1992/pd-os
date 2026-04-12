@@ -29,11 +29,11 @@ void kernel_main(void)
 
     /* ---- Banner ---------------------------------------------------------- */
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    kprintf("============================================================\n");
+    kprintf("===============================================================================\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("      PD-Kernel  v0.1  -  Phase 6: PD-Shell + Users\n");
+    kprintf("               PD-Kernel  v0.1  -  Phase 6: PD-Shell + Users\n");
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
-    kprintf("============================================================\n");
+    kprintf("===============================================================================\n");
 
     /* ---- Subsystem init -------------------------------------------------- */
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);

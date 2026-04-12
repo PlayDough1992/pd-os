@@ -114,6 +114,8 @@ void keyboard_handler(void)
         else if (sc == 0x50) arrow = KEY_DOWN;
         else if (sc == 0x4B) arrow = KEY_LEFT;
         else if (sc == 0x4D) arrow = KEY_RIGHT;
+        else if (sc == 0x49) arrow = KEY_PGUP;
+        else if (sc == 0x51) arrow = KEY_PGDN;
         if (arrow) {
             uint8_t next = (uint8_t)((kb_head + 1) % KB_BUF_SIZE);
             if (next != kb_tail) { kb_buf[kb_head] = arrow; kb_head = next; }
