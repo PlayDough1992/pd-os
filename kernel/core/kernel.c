@@ -129,20 +129,61 @@ void kernel_main(void)
     vfs_register(ext2_get_driver());
     vfs_register(ntfs_get_driver());
     {
-        int pdfs_ok = vfs_mount("/",         "pdfs",  200);
+        /* Mount secondary filesystems FIRST (before any PDFS write operations)
+         * so their ATA reads complete in a clean drive state.               */
         int fat_ok  = vfs_mount("/mnt/fat",  "fat32", 2048);
         int ext_ok  = vfs_mount("/mnt/ext2", "ext2",  4096);
         int ntfs_ok = vfs_mount("/mnt/ntfs", "ntfs",  69632);
+
+        /* PDFS init: format→scaffold→mount if blank/stale, else mount→scaffold */
+        int pdfs_ok = vfs_mount("/", "pdfs", 1024);
+
+        if (pdfs_ok == 0 && pdfs_is_ro()) {
+            vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+            kprintf("  (!) PDFS outdated — auto-upgrading to v3...\n");
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            pdfs_ok = -1;
+        }
+
+        if (pdfs_ok != 0) {
+            vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+            kprintf("  (!) PDFS not found — auto-formatting...\n");
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            if (pdfs_format(1024) != 0) {
+                vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+                kprintf("  (!) PDFS format failed: ATA error\n");
+                vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            } else {
+                kprintf("  (0) Building filesystem structure...");
+                pdfs_scaffold();
+                vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+                kprintf("  (X) COMPLETE\n");
+                vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+                pdfs_ok = vfs_mount("/", "pdfs", 1024);
+            }
+        }
+
         if (pdfs_ok == 0) {
             vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-            kprintf("  (X) PDFS at /  (%u KB free, %u files)\n",
-                    pdfs_free_sectors() / 2u,
-                    pdfs_file_count());
+            kprintf("  (X) PDFS at /  (%u KB free)\n",
+                    pdfs_free_sectors() / 2u);
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            kprintf("  (0) Enforcing filesystem structure...");
+            pdfs_scaffold();
+            vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            kprintf("  (X) COMPLETE\n");
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            kprintf("  (0) Loading user credentials from disk...");
+            users_load_from_disk();
+            vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            kprintf("  (X) COMPLETE\n");
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
         } else {
-            vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-            kprintf("  (!) PDFS not found  (run 'mkpdfs')\n");
+            vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            kprintf("  (!) PDFS init failed: no ATA drive detected\n");
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
         }
-        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
         if (fat_ok == 0) {
             vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
             kprintf("  (X) FAT32 at /mnt/fat\n");
@@ -169,12 +210,9 @@ void kernel_main(void)
     }
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
-    /* ---- Enable interrupts ----------------------------------------------- */
-    __asm__ volatile ("sti");
-    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-    kprintf("\n  Interrupts online.\n");
-
     /* ---- Process manager ------------------------------------------------- */
+    /* MUST be initialised before sti so no PIT interrupt fires with an        */
+    /* uninitialised g_procs table (would return saved_esp=0 → triple fault). */
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("  (0) Initialising process manager...");
     proc_init();
@@ -182,6 +220,11 @@ void kernel_main(void)
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     kprintf("  (X) Scheduler ready  (%d tasks)\n", proc_count_active());
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    /* ---- Enable interrupts ----------------------------------------------- */
+    __asm__ volatile ("sti");
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("\n  Interrupts online.\n");
 
     /* ---- Login + shell loop ---------------------------------------------- */
     /*

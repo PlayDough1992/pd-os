@@ -1,19 +1,30 @@
 /* ============================================================================
- * PD-Kernel  —  PDFS v2  (PD Filesystem, extended)  (Phase 8f)
+ * PD-Kernel  —  PDFS v3  (Chained Directory Sectors)
  *
- * Implements the vfs_driver_t interface for PDFS version 2.
+ * PDFS v3 removes the hard per-directory entry limit introduced in v2.
  *
- * New in v2:
- *   - 64-byte dirents: name(28), perms uid/gid/mode, ctime, is_dir flag
- *   - Subdirectory support: each dir has its own 4-sector dirent table
- *   - Full path traversal: open/create/unlink/mkdir resolve nested paths
- *   - Write-ahead journal: protects dir-sector flushes from torn writes
- *   - Permission checks on create/write/unlink/mkdir
- *   - v1 disk detection: mounts read-only when version != 2
+ * Directory structure:
+ *   Each directory is a singly-linked chain of 512-byte sectors.
+ *   Every sector holds 8 × 64-byte dirent slots:
+ *     Slots 0-6  usable directory entries  (PDFS_CHAIN_SLOTS = 7)
+ *     Slot  7    chain link: if PDFS_FLAG_CHAIN set → start_lba = next sector
+ *                            otherwise              → this is the last sector
+ *   A new directory starts with one sector.  When all 7 usable slots are full,
+ *   chain_alloc_slot() allocates a new sector, links it via slot 7, and
+ *   returns slot 0 of the new sector.  Directories grow without bound.
  *
- * Backwards compatibility:
- *   - If the on-disk version != 2, g_ro=1 and all writes return -5.
- *   - Run mkpdfs (requires elev) to upgrade/reformat to v2.
+ * Inode encoding (vfs_node_t.inode):
+ *   INODE_ENCODE(sec_lba, slot)  where:
+ *     sec_lba = absolute LBA of the SPECIFIC sector containing this entry
+ *     slot    = index 0-6 within that sector
+ *
+ * On-disk layout (all LBAs absolute):
+ *   base_lba+0   Superblock           (512 bytes)
+ *   base_lba+1   Journal slot         (512 bytes, reserved)
+ *   base_lba+2   Root dir sector[0]   (512 bytes, chain-extended on demand)
+ *   base_lba+3+  File data + additional dir chain sectors
+ *
+ * v1/v2 disks (version != 3) mount read-only. Run mkpdfs to reformat.
  * ============================================================================ */
 
 #include "pdfs.h"
@@ -21,7 +32,7 @@
 #include "users.h"
 #include "pit.h"
 
-/* ---- Permission context (set from shell via pdfs_set_context) ------------ */
+/* ---- Permission context -------------------------------------------------- */
 
 static const user_t *g_caller   = NULL;
 static int           g_elevated = 0;
@@ -35,43 +46,20 @@ void pdfs_set_context(const user_t *caller, int elevated)
 /* ---- Module state --------------------------------------------------------- */
 
 static pdfs_superblock_t g_sb;
-static pdfs_dirent_t     g_dir[PDFS_MAX_FILES];   /* root directory cache    */
 static int               g_mounted  = 0;
-static int               g_ro       = 0;           /* read-only (v1 disk)    */
+static int               g_ro       = 0;
 static uint32_t          g_base_lba = 0;
 
-/* Static work buffers — safe for single-threaded kernel, avoid stack overflow.
- * Each pdfs_dirent_t[32] = 2048 bytes; keeping them off the stack is critical. */
-static pdfs_dirent_t     s_pr[PDFS_MAX_FILES];    /* path_resolve working set  */
-static pdfs_dirent_t     s_rp[PDFS_MAX_FILES];    /* resolve_parent interim    */
-static pdfs_dirent_t     s_op[PDFS_MAX_FILES];    /* per-operation dir table   */
-
-/* Forward declaration — pd_memcpy is defined in the helpers section below. */
-static void pd_memcpy(void *dst, const void *src, uint32_t n);
-
 /*
- * Load a 32-entry directory table into `out`.
- * For the root directory, serves from the in-memory cache (no ATA read).
- * For subdirectories, reads one 512-byte sector at a time to avoid
- * reliability issues with multi-sector ATA PIO reads.
+ * Static working buffers — kept off the stack to avoid overflow.
+ * s_sec: one directory sector (8 slots × 64 B = 512 B).
+ *        Used by all dir-chain operations sequentially (single-threaded).
+ * s_io:  file data scratch; used only by pdfs_read / pdfs_write.
  */
-static int load_dir(uint32_t dir_lba, pdfs_dirent_t *out)
-{
-    if (dir_lba == g_sb.dir_lba) {
-        pd_memcpy(out, g_dir, PDFS_MAX_FILES * sizeof(pdfs_dirent_t));
-        return 0;
-    }
-    /* Subdir: read one sector at a time */
-    uint32_t s;
-    uint8_t *p = (uint8_t *)out;
-    for (s = 0; s < PDFS_DIR_SECTORS; s++) {
-        if (ata_read_sectors(dir_lba + s, 1, p) != 0) return -1;
-        p += 512u;
-    }
-    return 0;
-}
+static pdfs_dirent_t s_sec[8];   /* one dir sector                           */
+static uint8_t       s_io[512];  /* file data I/O scratch                    */
 
-/* ---- Internal helpers ----------------------------------------------------- */
+/* ---- String / memory helpers --------------------------------------------- */
 
 static int pd_strcmp(const char *a, const char *b)
 {
@@ -102,173 +90,229 @@ static void pd_strncpy(char *dst, const char *src, uint32_t n)
     dst[i] = '\0';
 }
 
-/* ---- Permission check ----------------------------------------------------- */
+/* ---- Permission checks ---------------------------------------------------- */
 
+/* write: caller is owner, root, elevated, or other-write bit set */
 static int perm_write_ok(const pdfs_dirent_t *de)
 {
-    if (g_elevated) return 1;
-    if (!g_caller)  return 0;
+    if (g_elevated)                       return 1;
+    if (!g_caller)                        return 0;
     if (g_caller->flags & USER_FLAG_ROOT) return 1;
     if (de->uid == g_caller->uid)         return 1;
     if (de->mode & PDFS_MODE_WOTH)        return 1;
     return 0;
 }
 
-/* ---- Directory flush ------------------------------------------------------ */
-
-/* Number of dirents that fit in one 512-byte sector (64B each = 8). */
-#define DENTS_PER_SEC  (512u / sizeof(pdfs_dirent_t))   /* = 8 */
-
-/* Write one directory sector directly to disk. */
-static void flush_dir_sector(const pdfs_dirent_t *dir, uint32_t lba,
-                              uint32_t sector_idx)
+/* execute/traverse: needed to enter a directory (cd / path traversal) */
+static int perm_exec_ok(const pdfs_dirent_t *de)
 {
-    uint8_t buf[512];
-    pd_memzero(buf, 512);
-    pd_memcpy(buf, dir + sector_idx * DENTS_PER_SEC,
-              DENTS_PER_SEC * sizeof(pdfs_dirent_t));
-    ata_write_sectors(lba + sector_idx, 1, buf);
+    if (g_elevated)                       return 1;
+    if (!g_caller)                        return 0;
+    if (g_caller->flags & USER_FLAG_ROOT) return 1;
+    if (de->uid == g_caller->uid && (de->mode & PDFS_MODE_XUSR)) return 1;
+    if (de->mode & PDFS_MODE_XOTH)        return 1;
+    return 0;
 }
 
-/* Flush only the one sector that contains dirent `slot` — minimises I/O. */
-static void flush_dir_slot(const pdfs_dirent_t *dir, uint32_t lba,
-                            uint32_t slot)
+/* read: needed to list directory contents (ls) */
+static int perm_read_ok(const pdfs_dirent_t *de)
 {
-    flush_dir_sector(dir, lba, slot / DENTS_PER_SEC);
+    if (g_elevated)                       return 1;
+    if (!g_caller)                        return 0;
+    if (g_caller->flags & USER_FLAG_ROOT) return 1;
+    if (de->uid == g_caller->uid && (de->mode & PDFS_MODE_RUSR)) return 1;
+    if (de->mode & PDFS_MODE_ROTH)        return 1;
+    return 0;
 }
+
+/* ---- Superblock flush ----------------------------------------------------- */
 
 static void flush_sb(void)
 {
     ata_write_sectors(g_base_lba, 1, &g_sb);
 }
 
+/* ---- Single-slot write-back ----------------------------------------------- */
+/*
+ * Read sec_lba into s_sec, replace slot slot_idx with *de, write back.
+ */
+static int flush_slot(uint32_t sec_lba, uint32_t slot_idx,
+                      const pdfs_dirent_t *de)
+{
+    if (ata_read_sectors(sec_lba, 1, s_sec) != 0) return -1;
+    pd_memcpy(&s_sec[slot_idx], de, sizeof(pdfs_dirent_t));
+    return ata_write_sectors(sec_lba, 1, s_sec) == 0 ? 0 : -1;
+}
+
+/* ---- Directory chain helpers --------------------------------------------- */
+
+/*
+ * Search for entry named `name` in the dir chain starting at first_lba.
+ * All out-parameters are optional (may be NULL).
+ * Returns 0 if found, -1 if not found or I/O error.  Uses s_sec.
+ */
+static int chain_find(uint32_t first_lba, const char *name,
+                      uint32_t *out_sec_lba, uint32_t *out_slot,
+                      pdfs_dirent_t *out_de)
+{
+    uint32_t lba = first_lba;
+    if (lba == 0u) return -1;
+
+    while (lba != 0u) {
+        if (ata_read_sectors(lba, 1, s_sec) != 0) return -1;
+
+        uint32_t i;
+        for (i = 0u; i < PDFS_CHAIN_SLOTS; i++) {
+            if ((s_sec[i].flags & PDFS_FLAG_USED) &&
+                !(s_sec[i].flags & PDFS_FLAG_CHAIN) &&
+                pd_strcmp(s_sec[i].name, name) == 0) {
+                if (out_sec_lba) *out_sec_lba = lba;
+                if (out_slot)    *out_slot    = i;
+                if (out_de)      pd_memcpy(out_de, &s_sec[i], sizeof(pdfs_dirent_t));
+                return 0;
+            }
+        }
+        lba = (s_sec[PDFS_CHAIN_LINK].flags & PDFS_FLAG_CHAIN)
+              ? s_sec[PDFS_CHAIN_LINK].start_lba : 0u;
+    }
+    return -1;
+}
+
+/*
+ * Find a free slot in the dir chain starting at first_lba.
+ * If all sectors are full, allocate a new sector and chain it.
+ * Returns 0 on success.  Uses s_sec and s_io (only for zeroing new sector).
+ */
+static int chain_alloc_slot(uint32_t first_lba,
+                            uint32_t *out_sec_lba, uint32_t *out_slot)
+{
+    if (first_lba == 0u) return -1;
+
+    uint32_t lba = first_lba, prev_lba = 0u;
+
+    while (lba != 0u) {
+        if (ata_read_sectors(lba, 1, s_sec) != 0) return -1;
+
+        uint32_t i;
+        for (i = 0u; i < PDFS_CHAIN_SLOTS; i++) {
+            if (!(s_sec[i].flags & PDFS_FLAG_USED)) {
+                *out_sec_lba = lba;
+                *out_slot    = i;
+                return 0;
+            }
+        }
+        prev_lba = lba;
+        lba = (s_sec[PDFS_CHAIN_LINK].flags & PDFS_FLAG_CHAIN)
+              ? s_sec[PDFS_CHAIN_LINK].start_lba : 0u;
+    }
+
+    /* All sectors full — extend the chain with a new sector.
+     * s_sec still holds prev_lba's data (last sector in old chain). */
+    uint32_t new_lba = g_sb.next_free_lba;
+    g_sb.next_free_lba += 1u;
+    flush_sb();
+
+    pd_memzero(s_io, 512u);
+    if (ata_write_sectors(new_lba, 1, s_io) != 0) return -1;
+
+    /* Link from prev_lba slot 7 (s_sec still has that sector's data). */
+    pd_memzero(&s_sec[PDFS_CHAIN_LINK], sizeof(pdfs_dirent_t));
+    s_sec[PDFS_CHAIN_LINK].flags     = PDFS_FLAG_CHAIN;
+    s_sec[PDFS_CHAIN_LINK].start_lba = new_lba;
+    if (ata_write_sectors(prev_lba, 1, s_sec) != 0) return -1;
+
+    *out_sec_lba = new_lba;
+    *out_slot    = 0u;
+    return 0;
+}
+
 /* ---- Path resolution ------------------------------------------------------ */
 
 /*
- * Resolve `path` (absolute or relative-to-root) to a dirent inside its
- * parent directory.  On success:
- *   - out_dir[]   = the 32-entry directory table containing the leaf entry
- *   - *out_lba    = LBA of that directory table on disk
- *   - returns     = index of the leaf dirent in out_dir[]
- *
- * On failure returns -1.
- *
- * Traversal always starts at the PDFS root (g_dir / g_sb.dir_lba).
- * A leading '/' is silently stripped.
- * Empty components (e.g. "//") are skipped.
+ * Resolve path to a specific dirent.  All out-params optional.
+ * Returns 0 on success, -1 on failure.  Uses s_sec via chain_find.
  */
 static int path_resolve(const char *path,
-                        pdfs_dirent_t *out_dir,
-                        uint32_t      *out_lba)
+                        uint32_t      *out_sec_lba,
+                        uint32_t      *out_slot,
+                        pdfs_dirent_t *out_de)
 {
-    /* Use static buffer — avoids 2KB+ stack allocation */
-    uint32_t cur_lba = g_sb.dir_lba;
-    pd_memcpy(s_pr, g_dir, PDFS_MAX_FILES * sizeof(pdfs_dirent_t));
+    uint32_t cur_dir = g_sb.dir_lba;
 
-    /* Strip leading '/' */
     while (*path == '/') path++;
     if (*path == '\0') return -1;
 
     for (;;) {
-        /* Parse next component */
-        char     comp[PDFS_NAME_LEN];
-        uint32_t ci = 0;
+        char comp[PDFS_NAME_LEN];
+        uint32_t ci = 0u;
         while (*path && *path != '/' && ci < PDFS_NAME_LEN - 1u)
             comp[ci++] = *path++;
         comp[ci] = '\0';
-        /* Skip consecutive '/' */
         while (*path == '/') path++;
 
         if (comp[0] == '\0') return -1;
 
-        /* Find comp in s_pr[] */
-        uint32_t i;
-        int found = -1;
-        for (i = 0; i < PDFS_MAX_FILES; i++) {
-            if ((s_pr[i].flags & PDFS_FLAG_USED) &&
-                pd_strcmp(s_pr[i].name, comp) == 0) {
-                found = (int)i;
-                break;
-            }
-        }
-        if (found < 0) return -1;
+        uint32_t found_sec, found_slot;
+        pdfs_dirent_t de;
+        if (chain_find(cur_dir, comp, &found_sec, &found_slot, &de) != 0)
+            return -1;
 
         if (*path == '\0') {
-            /* This is the leaf — return */
-            pd_memcpy(out_dir, s_pr, PDFS_MAX_FILES * sizeof(pdfs_dirent_t));
-            *out_lba = cur_lba;
-            return found;
+            /* Final component: if it's a directory, require execute to enter it.
+             * This enforces cd-permission and blocks traversal into private dirs. */
+            if ((de.flags & PDFS_FLAG_DIR) && !perm_exec_ok(&de)) return -4;
+            if (out_sec_lba) *out_sec_lba = found_sec;
+            if (out_slot)    *out_slot    = found_slot;
+            if (out_de)      pd_memcpy(out_de, &de, sizeof(de));
+            return 0;
         }
 
-        /* Must be a directory to descend */
-        if (!(s_pr[found].flags & PDFS_FLAG_DIR)) return -1;
-
-        /* Load subdir directly into s_pr — no extra stack array needed */
-        uint32_t sub_lba = s_pr[found].start_lba;
-        /* Read one sector at a time: avoids multi-sector ATA PIO issues */
-        uint32_t ps;
-        uint8_t *pp = (uint8_t *)s_pr;
-        for (ps = 0; ps < PDFS_DIR_SECTORS; ps++) {
-            if (ata_read_sectors(sub_lba + ps, 1, pp) != 0) return -1;
-            pp += 512u;
-        }
-        cur_lba = sub_lba;
+        if (!(de.flags & PDFS_FLAG_DIR)) return -1;
+        /* Intermediate directory: require execute to traverse it. */
+        if (!perm_exec_ok(&de)) return -4;
+        cur_dir = de.start_lba;
     }
 }
 
 /*
- * Resolve the PARENT directory of `path`.
- * `*name_out` is set to point at the filename component within `path`.
+ * Resolve the parent directory of path.
+ *   *parent_first_lba — first sector of parent dir chain
+ *   *name_out         — points to the leaf component within path
  * Returns 0 on success, -1 on failure.
  */
 static int resolve_parent(const char *path,
-                          pdfs_dirent_t *out_dir,
-                          uint32_t      *out_lba,
-                          const char   **name_out)
+                          uint32_t    *parent_first_lba,
+                          const char **name_out)
 {
-    /* Find last '/' */
-    const char *last_slash = 0;
+    const char *last_slash = NULL;
     const char *p = path;
     while (*p) { if (*p == '/') last_slash = p; p++; }
 
     if (!last_slash || last_slash == path) {
-        /* No slash or leading slash only → parent is root */
-        pd_memcpy(out_dir, g_dir, PDFS_MAX_FILES * sizeof(pdfs_dirent_t));
-        *out_lba   = g_sb.dir_lba;
-        *name_out  = last_slash ? last_slash + 1 : path;
+        *parent_first_lba = g_sb.dir_lba;
+        *name_out = last_slash ? last_slash + 1 : path;
         return 0;
     }
 
-    /* Resolve the parent path */
     char parent[128];
     uint32_t plen = (uint32_t)(last_slash - path);
     if (plen >= 128u) return -1;
     uint32_t k;
-    for (k = 0; k < plen; k++) parent[k] = path[k];
+    for (k = 0u; k < plen; k++) parent[k] = path[k];
     parent[plen] = '\0';
 
-    uint32_t      parent_container_lba;
-    int pidx = path_resolve(parent, s_rp, &parent_container_lba);
-    if (pidx < 0) return -1;
-    if (!(s_rp[pidx].flags & PDFS_FLAG_DIR)) return -1;
+    pdfs_dirent_t de;
+    if (path_resolve(parent, NULL, NULL, &de) != 0) return -1;
+    if (!(de.flags & PDFS_FLAG_DIR))              return -1;
 
-    uint32_t parent_lba = s_rp[pidx].start_lba;
-    /* resolve_parent for subdirs also reads one sector at a time via load_dir */
-    uint32_t ps;
-    uint8_t *pp = (uint8_t *)out_dir;
-    for (ps = 0; ps < PDFS_DIR_SECTORS; ps++) {
-        if (ata_read_sectors(parent_lba + ps, 1, pp) != 0) return -1;
-        pp += 512u;
-    }
-    *out_lba  = parent_lba;
-    *name_out = last_slash + 1;
+    *parent_first_lba = de.start_lba;
+    *name_out         = last_slash + 1;
     return 0;
 }
 
 /* ---- Inode encoding ------------------------------------------------------- */
-/* vfs_node_t.inode = (dir_lba << 5) | slot_index                           */
-/* dir_lba must be < 2^27; slot_index < 32                                  */
-#define INODE_ENCODE(lba, idx)   (((lba) << 5u) | ((idx) & 0x1Fu))
+/* v3: lba = specific sector containing this entry; slot = index 0-6 */
+#define INODE_ENCODE(lba, slot)  (((lba) << 5u) | ((slot) & 0x1Fu))
 #define INODE_IDX(inode)         ((inode) & 0x1Fu)
 #define INODE_LBA(inode)         ((inode) >> 5u)
 
@@ -277,7 +321,6 @@ static int resolve_parent(const char *path,
 static int pdfs_mount(uint32_t base_lba)
 {
     uint8_t buf[512];
-
     g_base_lba = base_lba;
     g_ro       = 0;
 
@@ -285,15 +328,7 @@ static int pdfs_mount(uint32_t base_lba)
     pd_memcpy(&g_sb, buf, sizeof(g_sb));
 
     if (g_sb.magic != PDFS_MAGIC) return -2;
-    if (g_sb.version != PDFS_VERSION) g_ro = 1;
-
-    {
-        uint32_t s; uint8_t *p = (uint8_t *)g_dir;
-        for (s = 0; s < PDFS_DIR_SECTORS; s++) {
-            if (ata_read_sectors(g_sb.dir_lba + s, 1, p) != 0) return -4;
-            p += 512u;
-        }
-    }
+    if (g_sb.version != PDFS_VERSION) g_ro = 1;  /* old version: read-only */
 
     g_mounted = 1;
     return 0;
@@ -301,21 +336,21 @@ static int pdfs_mount(uint32_t base_lba)
 
 static int pdfs_open(const char *name, vfs_node_t *out)
 {
+    int r;
     if (!g_mounted) return -1;
+    while (*name == '/') name++;
+    if (*name == '\0') return -1;
 
-    /* Strip leading '/' */
-    const char *p = name;
-    while (*p == '/') p++;
+    uint32_t sec_lba, slot;
+    pdfs_dirent_t de;
+    r = path_resolve(name, &sec_lba, &slot, &de);
+    if (r != 0) return r;   /* propagate -4 (perm denied) vs -1 (not found) */
 
-    uint32_t dir_lba;
-    int idx = path_resolve(p, s_op, &dir_lba);
-    if (idx < 0) return -1;
-
-    pd_strncpy(out->name, s_op[idx].name, VFS_NAME_MAX);
-    out->size      = s_op[idx].size;
-    out->inode     = INODE_ENCODE(dir_lba, (uint32_t)idx);
-    out->is_dir    = (s_op[idx].flags & PDFS_FLAG_DIR) ? 1u : 0u;
-    out->mount_idx = 0;
+    pd_strncpy(out->name, de.name, VFS_NAME_MAX);
+    out->size      = de.size;
+    out->inode     = INODE_ENCODE(sec_lba, slot);
+    out->is_dir    = (de.flags & PDFS_FLAG_DIR) ? 1u : 0u;
+    out->mount_idx = 0u;
     return 0;
 }
 
@@ -323,29 +358,29 @@ static int pdfs_read(vfs_node_t *node, uint32_t offset, uint32_t len, void *buf)
 {
     if (!g_mounted) return -1;
 
-    uint32_t idx     = INODE_IDX(node->inode);
-    uint32_t dir_lba = INODE_LBA(node->inode);
+    uint32_t sec_lba = INODE_LBA(node->inode);
+    uint32_t slot    = INODE_IDX(node->inode);
 
-    if (load_dir(dir_lba, s_op) != 0) return -1;
+    if (ata_read_sectors(sec_lba, 1, s_sec) != 0) return -1;
+    pdfs_dirent_t de;
+    pd_memcpy(&de, &s_sec[slot], sizeof(de));
 
-    pdfs_dirent_t *de = &s_op[idx];
-    if (!(de->flags & PDFS_FLAG_USED) || (de->flags & PDFS_FLAG_DIR)) return -1;
-    if (offset >= de->size) return 0;
+    if (!(de.flags & PDFS_FLAG_USED) || (de.flags & PDFS_FLAG_DIR)) return -1;
+    if (offset >= de.size) return 0;
 
-    uint32_t to_read = de->size - offset;
+    uint32_t to_read = de.size - offset;
     if (len < to_read) to_read = len;
 
-    uint8_t *out  = (uint8_t *)buf;
-    uint32_t done = 0;
+    uint8_t *outp = (uint8_t *)buf;
+    uint32_t done = 0u;
     while (done < to_read) {
-        uint8_t  tmp[512];
         uint32_t abs_off    = offset + done;
         uint32_t sector_i   = abs_off / 512u;
         uint32_t sector_off = abs_off % 512u;
         uint32_t chunk      = 512u - sector_off;
         if (chunk > to_read - done) chunk = to_read - done;
-        if (ata_read_sectors(de->start_lba + sector_i, 1, tmp) != 0) return -1;
-        pd_memcpy(out + done, tmp + sector_off, chunk);
+        if (ata_read_sectors(de.start_lba + sector_i, 1, s_io) != 0) return -1;
+        pd_memcpy(outp + done, s_io + sector_off, chunk);
         done += chunk;
     }
     return (int)done;
@@ -356,128 +391,413 @@ static int pdfs_write(vfs_node_t *node, uint32_t offset, uint32_t len,
 {
     if (!g_mounted) return -1;
     if (g_ro)       return -5;
-    if (offset != 0) return -2;   /* full-file writes only */
+    if (offset != 0) return -2;
 
-    uint32_t idx     = INODE_IDX(node->inode);
-    uint32_t dir_lba = INODE_LBA(node->inode);
+    uint32_t sec_lba = INODE_LBA(node->inode);
+    uint32_t slot    = INODE_IDX(node->inode);
 
-    if (load_dir(dir_lba, s_op) != 0) return -1;
+    if (ata_read_sectors(sec_lba, 1, s_sec) != 0) return -1;
+    pdfs_dirent_t de;
+    pd_memcpy(&de, &s_sec[slot], sizeof(de));
 
-    pdfs_dirent_t *de = &s_op[idx];
-    if (!(de->flags & PDFS_FLAG_USED) || (de->flags & PDFS_FLAG_DIR)) return -1;
-    if (!perm_write_ok(de)) return -3;
+    if (!(de.flags & PDFS_FLAG_USED) || (de.flags & PDFS_FLAG_DIR)) return -1;
+    if (!perm_write_ok(&de)) return -3;
 
-    if (len == 0) {
-        de->size = 0;
-        flush_dir_slot(s_op, dir_lba, idx);
-        if (dir_lba == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
-        return 0;
+    if (len == 0u) {
+        de.size = 0u;
+        pd_memcpy(&s_sec[slot], &de, sizeof(de));
+        return ata_write_sectors(sec_lba, 1, s_sec) == 0 ? 0 : -1;
     }
 
     uint32_t needed = (len + 511u) / 512u;
-    if (de->alloc_sectors < needed) {
-        de->start_lba     = g_sb.next_free_lba;
-        de->alloc_sectors = needed;
+    if (de.alloc_sectors < needed) {
+        de.start_lba     = g_sb.next_free_lba;
+        de.alloc_sectors = needed;
         g_sb.next_free_lba += needed;
-        flush_sb();
+        flush_sb();   /* writes g_sb to g_base_lba; does not touch s_sec */
     }
 
-    const uint8_t *src  = (const uint8_t *)buf;
-    uint32_t       done = 0;
-    uint32_t       i;
-    for (i = 0; i < needed; i++) {
-        uint8_t  tmp[512];
+    const uint8_t *src = (const uint8_t *)buf;
+    uint32_t done = 0u, i;
+    for (i = 0u; i < needed; i++) {
+        pd_memzero(s_io, 512u);
         uint32_t chunk = len - done;
         if (chunk > 512u) chunk = 512u;
-        pd_memzero(tmp, 512u);
-        pd_memcpy(tmp, src + done, chunk);
-        if (ata_write_sectors(de->start_lba + i, 1, tmp) != 0) return -1;
+        pd_memcpy(s_io, src + done, chunk);
+        if (ata_write_sectors(de.start_lba + i, 1, s_io) != 0) return -1;
         done += chunk;
     }
 
-    de->size = len;
-    flush_dir_slot(s_op, dir_lba, idx);
-    if (dir_lba == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
-    return (int)done;
+    /* s_sec still holds the dir sector from the read above — write back. */
+    de.size = len;
+    pd_memcpy(&s_sec[slot], &de, sizeof(de));
+    return ata_write_sectors(sec_lba, 1, s_sec) == 0 ? (int)done : -1;
 }
 
 static int pdfs_create(const char *path)
 {
     if (!g_mounted) return -1;
     if (g_ro)       return -5;
-
-    /* Strip leading '/' */
     while (*path == '/') path++;
 
-    const char   *fname;
-    uint32_t      dir_lba;
-    if (resolve_parent(path, s_op, &dir_lba, &fname) != 0) return -1;
-    if (pd_strlen(fname) == 0 || pd_strlen(fname) >= PDFS_NAME_LEN) return -2;
+    uint32_t parent_first;
+    const char *fname;
+    if (resolve_parent(path, &parent_first, &fname) != 0) return -1;
+    if (pd_strlen(fname) == 0u || pd_strlen(fname) >= PDFS_NAME_LEN) return -2;
 
-    uint32_t i;
-    for (i = 0; i < PDFS_MAX_FILES; i++)
-        if ((s_op[i].flags & PDFS_FLAG_USED) &&
-            pd_strcmp(s_op[i].name, fname) == 0) return -3;
+    if (chain_find(parent_first, fname, NULL, NULL, NULL) == 0) return -3;
 
-    for (i = 0; i < PDFS_MAX_FILES; i++) {
-        if (!(s_op[i].flags & PDFS_FLAG_USED)) {
-            pd_memzero(&s_op[i], sizeof(pdfs_dirent_t));
-            pd_strncpy(s_op[i].name, fname, PDFS_NAME_LEN);
-            s_op[i].flags = PDFS_FLAG_USED;
-            s_op[i].mode  = PDFS_MODE_DEFAULT;
-            s_op[i].uid   = g_caller ? g_caller->uid : 0u;
-            s_op[i].ctime = pit_get_ticks();
-            flush_dir_slot(s_op, dir_lba, i);
-            if (dir_lba == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
-            return 0;
-        }
-    }
-    return -4;
+    uint32_t new_sec, new_slot;
+    if (chain_alloc_slot(parent_first, &new_sec, &new_slot) != 0) return -4;
+
+    pdfs_dirent_t de;
+    pd_memzero(&de, sizeof(de));
+    pd_strncpy(de.name, fname, PDFS_NAME_LEN);
+    de.flags = PDFS_FLAG_USED;
+    de.mode  = PDFS_MODE_DEFAULT;
+    de.uid   = g_caller ? g_caller->uid : 0u;
+    de.ctime = pit_get_ticks();
+    return flush_slot(new_sec, new_slot, &de);
 }
 
 static int pdfs_unlink(const char *path)
 {
     if (!g_mounted) return -1;
     if (g_ro)       return -5;
-
     while (*path == '/') path++;
 
-    const char   *fname;
-    uint32_t      dir_lba;
-    if (resolve_parent(path, s_op, &dir_lba, &fname) != 0) return -1;
+    uint32_t sec_lba, slot;
+    pdfs_dirent_t de;
+    if (path_resolve(path, &sec_lba, &slot, &de) != 0) return -1;
+    if (de.flags & PDFS_FLAG_DIR) return -2;
+    if (!perm_write_ok(&de))      return -3;
 
-    uint32_t i;
-    for (i = 0; i < PDFS_MAX_FILES; i++) {
-        if ((s_op[i].flags & PDFS_FLAG_USED) &&
-            pd_strcmp(s_op[i].name, fname) == 0) {
-            if (!perm_write_ok(&s_op[i])) return -3;
-            pd_memzero(&s_op[i], sizeof(pdfs_dirent_t));
-            flush_dir_slot(s_op, dir_lba, i);
-            if (dir_lba == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
-            return 0;
-        }
-    }
-    return -1;
+    pd_memzero(&de, sizeof(de));
+    return flush_slot(sec_lba, slot, &de);
 }
 
 static int pdfs_readdir(uint32_t idx, vfs_node_t *out)
 {
-    uint32_t count = 0, i;
     if (!g_mounted) return -1;
-    for (i = 0; i < PDFS_MAX_FILES; i++) {
-        if (g_dir[i].flags & PDFS_FLAG_USED) {
-            if (count == idx) {
-                pd_strncpy(out->name, g_dir[i].name, VFS_NAME_MAX);
-                out->size      = g_dir[i].size;
-                out->inode     = INODE_ENCODE(g_sb.dir_lba, i);
-                out->is_dir    = (g_dir[i].flags & PDFS_FLAG_DIR) ? 1u : 0u;
-                out->mount_idx = 0;
-                return 0;
+
+    uint32_t count = 0u, lba = g_sb.dir_lba;
+    while (lba != 0u) {
+        if (ata_read_sectors(lba, 1, s_sec) != 0) return -1;
+        uint32_t i;
+        for (i = 0u; i < PDFS_CHAIN_SLOTS; i++) {
+            if (s_sec[i].flags & PDFS_FLAG_USED) {
+                if (count == idx) {
+                    pd_strncpy(out->name, s_sec[i].name, VFS_NAME_MAX);
+                    out->size      = s_sec[i].size;
+                    out->inode     = INODE_ENCODE(lba, i);
+                    out->is_dir    = (s_sec[i].flags & PDFS_FLAG_DIR) ? 1u : 0u;
+                    out->mount_idx = 0u;
+                    return 0;
+                }
+                count++;
             }
-            count++;
         }
+        lba = (s_sec[PDFS_CHAIN_LINK].flags & PDFS_FLAG_CHAIN)
+              ? s_sec[PDFS_CHAIN_LINK].start_lba : 0u;
     }
     return -1;
+}
+
+/* ---- Public API: format --------------------------------------------------- */
+
+int pdfs_format(uint32_t base_lba)
+{
+    pd_memzero(&g_sb, sizeof(g_sb));
+    g_sb.magic         = PDFS_MAGIC;
+    g_sb.version       = PDFS_VERSION;
+    g_sb.jrnl_lba      = base_lba + 1u;
+    g_sb.dir_lba       = base_lba + 2u;
+    g_sb.dir_sectors   = 1u;
+    g_sb.data_lba      = base_lba + 3u;
+    g_sb.next_free_lba = base_lba + 3u;
+
+    if (ata_write_sectors(base_lba, 1, &g_sb) != 0) return -1;
+
+    pd_memzero(s_io, 512u);
+    if (ata_write_sectors(g_sb.jrnl_lba, 1, s_io) != 0) return -2;
+    if (ata_write_sectors(g_sb.dir_lba,  1, s_io) != 0) return -3;
+
+    g_base_lba = base_lba;
+    g_mounted  = 1;
+    g_ro       = 0;
+    return 0;
+}
+
+/* ---- Public API: mkdir, chmod, chown ------------------------------------- */
+
+int pdfs_mkdir(const char *path, uint8_t uid, uint8_t gid, uint16_t mode)
+{
+    if (!g_mounted) return -1;
+    if (g_ro)       return -5;
+    while (*path == '/') path++;
+
+    uint32_t parent_first;
+    const char *dname;
+    if (resolve_parent(path, &parent_first, &dname) != 0) return -1;
+    if (pd_strlen(dname) == 0u || pd_strlen(dname) >= PDFS_NAME_LEN) return -2;
+
+    /* -3 = already exists: callers (scaffold) treat this as idempotent */
+    if (chain_find(parent_first, dname, NULL, NULL, NULL) == 0) return -3;
+
+    /* Allocate the new directory's initial single sector. */
+    uint32_t sub_lba = g_sb.next_free_lba;
+    g_sb.next_free_lba += 1u;
+    flush_sb();
+
+    pd_memzero(s_io, 512u);
+    if (ata_write_sectors(sub_lba, 1, s_io) != 0) return -6;
+
+    uint32_t new_sec, new_slot;
+    if (chain_alloc_slot(parent_first, &new_sec, &new_slot) != 0) return -4;
+
+    pdfs_dirent_t de;
+    pd_memzero(&de, sizeof(de));
+    pd_strncpy(de.name, dname, PDFS_NAME_LEN);
+    de.start_lba     = sub_lba;
+    de.alloc_sectors = 1u;
+    de.flags         = PDFS_FLAG_USED | PDFS_FLAG_DIR;
+    de.uid           = uid;
+    de.gid           = gid;
+    de.mode          = mode ? mode : PDFS_MODE_DIR_DEF;
+    de.dir_sectors   = 1u;
+    de.ctime         = pit_get_ticks();
+    return flush_slot(new_sec, new_slot, &de);
+}
+
+int pdfs_chmod(const char *path, uint16_t mode)
+{
+    if (!g_mounted) return -1;
+    if (g_ro)       return -5;
+    while (*path == '/') path++;
+
+    uint32_t sec_lba, slot;
+    pdfs_dirent_t de;
+    if (path_resolve(path, &sec_lba, &slot, &de) != 0) return -1;
+    if (!perm_write_ok(&de)) return -3;
+
+    de.mode = mode;
+    return flush_slot(sec_lba, slot, &de);
+}
+
+int pdfs_chown(const char *path, uint8_t uid, uint8_t gid)
+{
+    if (!g_mounted) return -1;
+    if (g_ro)       return -5;
+    while (*path == '/') path++;
+
+    if (!g_elevated && !(g_caller && (g_caller->flags & USER_FLAG_ROOT)))
+        return -3;
+
+    uint32_t sec_lba, slot;
+    pdfs_dirent_t de;
+    if (path_resolve(path, &sec_lba, &slot, &de) != 0) return -1;
+
+    de.uid = uid;
+    de.gid = gid;
+    return flush_slot(sec_lba, slot, &de);
+}
+
+/* ---- Statistics ----------------------------------------------------------- */
+
+uint32_t pdfs_free_sectors(void)
+{
+    const ata_drive_t *drv;
+    if (!g_mounted) return 0u;
+    drv = ata_get_drive();
+    if (!drv->present) return 0u;
+    if (g_sb.next_free_lba >= drv->total_sectors) return 0u;
+    return drv->total_sectors - g_sb.next_free_lba;
+}
+
+uint32_t pdfs_file_count(void)
+{
+    if (!g_mounted) return 0u;
+    uint32_t n = 0u, lba = g_sb.dir_lba;
+    while (lba != 0u) {
+        if (ata_read_sectors(lba, 1, s_sec) != 0) break;
+        uint32_t i;
+        for (i = 0u; i < PDFS_CHAIN_SLOTS; i++)
+            if (s_sec[i].flags & PDFS_FLAG_USED) n++;
+        lba = (s_sec[PDFS_CHAIN_LINK].flags & PDFS_FLAG_CHAIN)
+              ? s_sec[PDFS_CHAIN_LINK].start_lba : 0u;
+    }
+    return n;
+}
+
+int pdfs_is_ro(void) { return g_ro; }
+
+/* ---- Directory enumeration ----------------------------------------------- */
+
+int pdfs_stat_root(uint32_t idx, pdfs_dirent_t *out)
+{
+    return pdfs_stat_dir("", idx, out);
+}
+
+int pdfs_stat_dir(const char *path, uint32_t idx, pdfs_dirent_t *out)
+{
+    if (!g_mounted) return -1;
+    while (*path == '/') path++;
+
+    uint32_t first_lba;
+    if (*path == '\0') {
+        first_lba = g_sb.dir_lba;
+    } else {
+        pdfs_dirent_t de;
+        int r = path_resolve(path, NULL, NULL, &de);
+        if (r != 0) return r;                        /* -4 perm denied, -1 not found */
+        if (!(de.flags & PDFS_FLAG_DIR)) return -1;
+        if (!perm_read_ok(&de)) return -4;           /* have exec but not read (ls blocked) */
+        first_lba = de.start_lba;
+    }
+
+    uint32_t count = 0u, lba = first_lba;
+    while (lba != 0u) {
+        if (ata_read_sectors(lba, 1, s_sec) != 0) return -1;
+        uint32_t i;
+        for (i = 0u; i < PDFS_CHAIN_SLOTS; i++) {
+            if (s_sec[i].flags & PDFS_FLAG_USED) {
+                if (count == idx) {
+                    pd_memcpy(out, &s_sec[i], sizeof(*out));
+                    return 0;
+                }
+                count++;
+            }
+        }
+        lba = (s_sec[PDFS_CHAIN_LINK].flags & PDFS_FLAG_CHAIN)
+              ? s_sec[PDFS_CHAIN_LINK].start_lba : 0u;
+    }
+    return -1;
+}
+
+/* ---- Public API: create user home directory ------------------------------ */
+/*
+ * Create /home/<username> with mode 0700 (rwx------) owned by uid,
+ * plus the standard XDG subdirectories.  Public/ gets 0755 so other
+ * users can read it.  Runs fully elevated — caller need not set context.
+ */
+void pdfs_create_home(const char *username, uint8_t uid)
+{
+    char path[64];
+    uint32_t ulen = pd_strlen(username);
+    uint32_t i, j, s;
+
+    static const char * const subdirs[] = {
+        "Desktop", "Documents", "Downloads", "Pictures",
+        "Videos",  "Music",     "Templates", NULL
+    };
+
+    if (ulen == 0u || ulen > 27u) return;
+
+    pdfs_set_context(NULL, 1);   /* elevated — root creates home dirs */
+
+    /* Build: /home/<username>  (mode 0700 = rwx------) */
+    path[0]='/' ; path[1]='h'; path[2]='o'; path[3]='m';
+    path[4]='e' ; path[5]='/';
+    for (j = 0u; j < ulen; j++) path[6u + j] = username[j];
+    path[6u + ulen] = '\0';
+    pdfs_mkdir(path, uid, uid, 0x1C0u);
+
+    /* Private subdirs: same 0700 mode */
+    for (s = 0u; subdirs[s]; s++) {
+        uint32_t slen = pd_strlen(subdirs[s]);
+        path[6u + ulen] = '/';
+        for (i = 0u; i < slen; i++) path[6u + ulen + 1u + i] = subdirs[s][i];
+        path[6u + ulen + 1u + slen] = '\0';
+        pdfs_mkdir(path, uid, uid, 0x1C0u);
+    }
+
+    /* Public/ — world-readable (0755 = rwxr-xr-x) */
+    path[6u + ulen] = '/';
+    path[6u + ulen + 1u] = 'P'; path[6u + ulen + 2u] = 'u';
+    path[6u + ulen + 3u] = 'b'; path[6u + ulen + 4u] = 'l';
+    path[6u + ulen + 5u] = 'i'; path[6u + ulen + 6u] = 'c';
+    path[6u + ulen + 7u] = '\0';
+    pdfs_mkdir(path, uid, uid, 0x1EDu);
+
+    pdfs_set_context(NULL, 0);
+}
+
+/* ---- Filesystem scaffold ------------------------------------------------- */
+/*
+ * Create the standard PD-OS / FHS directory tree.
+ * All pdfs_mkdir calls return -3 (already exists) when the dir is present,
+ * which is silently ignored — making this function safely idempotent.
+ * Called at boot (after mount) and after mkpdfs reformat.
+ */
+void pdfs_scaffold(void)
+{
+    static const char ver[] = "PD-OS v0.1\n";
+    vfs_node_t nd;
+
+    pdfs_set_context(NULL, 1);   /* elevated — bypasses permission checks */
+
+    /* ---- Root-level FHS directories --------------------------------------- */
+    pdfs_mkdir("/bin",   0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/sbin",  0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/lib",   0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/root",  0, 0, 0x1C0u);              /* rwx------ */
+    pdfs_mkdir("/home",  0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/etc",   0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/var",   0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/usr",   0, 0, 0x1C0u);   /* rwx------: root only              */
+    pdfs_chmod("/usr",   0x1C0u);          /* enforce on every boot/reformat     */
+    pdfs_chmod("/home",  PDFS_MODE_DIR_DEF); /* enforce world-traversable          */
+    pdfs_mkdir("/opt",   0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/tmp",   0, 0, 0x1FFu);              /* rwxrwxrwx */
+    pdfs_mkdir("/dev",   0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/proc",  0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/mnt",   0, 0, PDFS_MODE_DIR_DEF);
+
+    /* ---- /home/pd user dirs (rwx------ for all private dirs) -------------- */
+    pdfs_mkdir("/home/pd",           1, 1, 0x1C0u);   /* rwx------ */
+    pdfs_mkdir("/home/pd/Desktop",   1, 1, 0x1C0u);
+    pdfs_mkdir("/home/pd/Documents", 1, 1, 0x1C0u);
+    pdfs_mkdir("/home/pd/Downloads", 1, 1, 0x1C0u);
+    pdfs_mkdir("/home/pd/Pictures",  1, 1, 0x1C0u);
+    pdfs_mkdir("/home/pd/Videos",    1, 1, 0x1C0u);
+    pdfs_mkdir("/home/pd/Music",     1, 1, 0x1C0u);
+    pdfs_mkdir("/home/pd/Templates", 1, 1, 0x1C0u);
+    pdfs_mkdir("/home/pd/Public",    1, 1, 0x1EDu);   /* rwxr-xr-x */
+
+    /* ---- /root user dirs -------------------------------------------------- */
+    pdfs_mkdir("/root/Desktop",   0, 0, 0x1C0u);
+    pdfs_mkdir("/root/Documents", 0, 0, 0x1C0u);
+    pdfs_mkdir("/root/Downloads", 0, 0, 0x1C0u);
+    pdfs_mkdir("/root/Pictures",  0, 0, 0x1C0u);
+    pdfs_mkdir("/root/Videos",    0, 0, 0x1C0u);
+    pdfs_mkdir("/root/Music",     0, 0, 0x1C0u);
+    pdfs_mkdir("/root/Templates", 0, 0, 0x1C0u);
+    pdfs_mkdir("/root/Public",    0, 0, 0x1EDu);
+
+    /* ---- /etc subdirs ----------------------------------------------------- */
+    pdfs_mkdir("/etc/pd-os", 0, 0, PDFS_MODE_DIR_DEF);
+
+    /* ---- /var subdirs ----------------------------------------------------- */
+    pdfs_mkdir("/var/log",   0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/var/tmp",   0, 0, 0x1FFu);
+    pdfs_mkdir("/var/cache", 0, 0, PDFS_MODE_DIR_DEF);
+
+    /* ---- /usr subdirs ----------------------------------------------------- */
+    pdfs_mkdir("/usr/bin",       0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/usr/sbin",      0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/usr/lib",       0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/usr/share",     0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/usr/local",     0, 0, PDFS_MODE_DIR_DEF);
+    pdfs_mkdir("/usr/local/bin", 0, 0, PDFS_MODE_DIR_DEF);
+
+    /* ---- /etc/pd-os/version (create only if absent) ----------------------- */
+    if (vfs_open("/etc/pd-os/version", &nd) != 0) {
+        if (vfs_create("/etc/pd-os/version") == 0 &&
+            vfs_open("/etc/pd-os/version", &nd) == 0)
+            vfs_write(&nd, 0, (uint32_t)(sizeof(ver) - 1u), ver);
+    }
+
+    pdfs_set_context(NULL, 0);
 }
 
 /* ---- Driver registration -------------------------------------------------- */
@@ -497,208 +817,3 @@ vfs_driver_t *pdfs_get_driver(void)
 {
     return &pdfs_driver;
 }
-
-/* ---- mkdir ---------------------------------------------------------------- */
-
-int pdfs_mkdir(const char *path, uint8_t uid, uint8_t gid, uint16_t mode)
-{
-    if (!g_mounted) return -1;
-    if (g_ro)       return -5;
-
-    while (*path == '/') path++;
-
-    const char   *dname;
-    uint32_t      dir_lba;
-    if (resolve_parent(path, s_op, &dir_lba, &dname) != 0) return -1;
-    if (pd_strlen(dname) == 0 || pd_strlen(dname) >= PDFS_NAME_LEN) return -2;
-
-    uint32_t i;
-    for (i = 0; i < PDFS_MAX_FILES; i++)
-        if ((s_op[i].flags & PDFS_FLAG_USED) &&
-            pd_strcmp(s_op[i].name, dname) == 0) return -3;
-
-    /* Allocate a fresh empty dir table on disk */
-    uint32_t sub_lba = g_sb.next_free_lba;
-    {
-        uint8_t empty[512];
-        pd_memzero(empty, 512);
-        uint32_t s;
-        for (s = 0; s < PDFS_DIR_SECTORS; s++) {
-            if (ata_write_sectors(sub_lba + s, 1, empty) != 0) return -6;
-        }
-    }
-    g_sb.next_free_lba += PDFS_DIR_SECTORS;
-    flush_sb();
-
-    for (i = 0; i < PDFS_MAX_FILES; i++) {
-        if (!(s_op[i].flags & PDFS_FLAG_USED)) {
-            pd_memzero(&s_op[i], sizeof(pdfs_dirent_t));
-            pd_strncpy(s_op[i].name, dname, PDFS_NAME_LEN);
-            s_op[i].start_lba     = sub_lba;
-            s_op[i].size          = 0;
-            s_op[i].alloc_sectors = PDFS_DIR_SECTORS;
-            s_op[i].flags         = PDFS_FLAG_USED | PDFS_FLAG_DIR;
-            s_op[i].uid           = uid;
-            s_op[i].gid           = gid;
-            s_op[i].mode          = mode ? mode : PDFS_MODE_DIR_DEF;
-            s_op[i].dir_sectors   = PDFS_DIR_SECTORS;
-            s_op[i].ctime         = pit_get_ticks();
-            flush_dir_slot(s_op, dir_lba, i);
-            if (dir_lba == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
-            return 0;
-        }
-    }
-    return -4;
-}
-
-/* ---- chmod / chown -------------------------------------------------------- */
-
-int pdfs_chmod(const char *path, uint16_t mode)
-{
-    if (!g_mounted) return -1;
-    if (g_ro)       return -5;
-
-    while (*path == '/') path++;
-
-    uint32_t dir_lba;
-    int idx = path_resolve(path, s_op, &dir_lba);
-    if (idx < 0) return -1;
-    if (!perm_write_ok(&s_op[idx])) return -3;
-
-    s_op[idx].mode = mode;
-    flush_dir_slot(s_op, dir_lba, (uint32_t)idx);
-    if (dir_lba == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
-    return 0;
-}
-
-int pdfs_chown(const char *path, uint8_t uid, uint8_t gid)
-{
-    if (!g_mounted) return -1;
-    if (g_ro)       return -5;
-
-    while (*path == '/') path++;
-
-    /* chown requires root or elevated */
-    if (!g_elevated && !(g_caller && (g_caller->flags & USER_FLAG_ROOT)))
-        return -3;
-
-    uint32_t dir_lba2;
-    int idx2 = path_resolve(path, s_op, &dir_lba2);
-    if (idx2 < 0) return -1;
-
-    s_op[idx2].uid = uid;
-    s_op[idx2].gid = gid;
-    flush_dir_slot(s_op, dir_lba2, (uint32_t)idx2);
-    if (dir_lba2 == g_sb.dir_lba) pd_memcpy(g_dir, s_op, sizeof(g_dir));
-    return 0;
-}
-
-/* ---- Format --------------------------------------------------------------- */
-
-int pdfs_format(uint32_t base_lba)
-{
-    pd_memzero(&g_sb, sizeof(g_sb));
-    g_sb.magic         = PDFS_MAGIC;
-    g_sb.version       = PDFS_VERSION;
-    g_sb.jrnl_lba      = base_lba + PDFS_SB_SECTORS;
-    g_sb.dir_lba       = base_lba + PDFS_SB_SECTORS + PDFS_JRNL_SECTORS;
-    g_sb.dir_sectors   = PDFS_DIR_SECTORS;
-    g_sb.data_lba      = g_sb.dir_lba + PDFS_DIR_SECTORS;
-    g_sb.next_free_lba = g_sb.data_lba;
-    /* reserved[0..1] used as journal dirty+target; clear them */
-    g_sb.reserved[0] = 0u;
-    g_sb.reserved[1] = 0u;
-
-    if (ata_write_sectors(base_lba, 1, &g_sb) != 0) return -1;
-
-    /* Clear journal sector */
-    uint8_t empty[512];
-    pd_memzero(empty, 512);
-    if (ata_write_sectors(g_sb.jrnl_lba, 1, empty) != 0) return -2;
-
-    /* Write empty root directory (PDFS_DIR_SECTORS × 512 bytes) */
-    pd_memzero(g_dir, sizeof(g_dir));
-    {
-        uint32_t s;
-        for (s = 0; s < PDFS_DIR_SECTORS; s++)
-            flush_dir_sector(g_dir, g_sb.dir_lba, s);
-    }
-
-    g_base_lba = base_lba;
-    g_mounted  = 1;
-    g_ro       = 0;
-    return 0;
-}
-
-/* ---- Statistics ----------------------------------------------------------- */
-
-uint32_t pdfs_free_sectors(void)
-{
-    const ata_drive_t *drv;
-    if (!g_mounted) return 0;
-    drv = ata_get_drive();
-    if (!drv->present) return 0;
-    if (g_sb.next_free_lba >= drv->total_sectors) return 0;
-    return drv->total_sectors - g_sb.next_free_lba;
-}
-
-uint32_t pdfs_file_count(void)
-{
-    uint32_t n = 0, i;
-    if (!g_mounted) return 0;
-    for (i = 0; i < PDFS_MAX_FILES; i++)
-        if (g_dir[i].flags & PDFS_FLAG_USED) n++;
-    return n;
-}
-
-/* ---- Query dir entry for ls ----------------------------------------------- */
-
-int pdfs_stat_root(uint32_t idx, pdfs_dirent_t *out)
-{
-    uint32_t count = 0, i;
-    if (!g_mounted) return -1;
-    for (i = 0; i < PDFS_MAX_FILES; i++) {
-        if (g_dir[i].flags & PDFS_FLAG_USED) {
-            if (count == idx) { pd_memcpy(out, &g_dir[i], sizeof(*out)); return 0; }
-            count++;
-        }
-    }
-    return -1;
-}
-
-/*
- * Fill `out` with the idx-th used entry of the directory at `path`.
- * For path "/" (or empty), delegates to pdfs_stat_root.
- * Returns 0 on success, -1 otherwise.
- */
-int pdfs_stat_dir(const char *path, uint32_t idx, pdfs_dirent_t *out)
-{
-    if (!g_mounted) return -1;
-
-    /* Strip leading '/' — if nothing left it's the root */
-    while (*path == '/') path++;
-    if (*path == '\0') return pdfs_stat_root(idx, out);
-
-    /* Resolve to get the directory dirent in s_op */
-    uint32_t dir_lba;
-    int didx = path_resolve(path, s_op, &dir_lba);
-    if (didx < 0) return -1;
-    if (!(s_op[didx].flags & PDFS_FLAG_DIR)) return -1;
-
-    /* Load the subdir's own table into s_rp (reuse static buffer) */
-    uint32_t sub_lba = s_op[didx].start_lba;
-    if (load_dir(sub_lba, s_rp) != 0) return -1;
-
-    uint32_t count = 0, i;
-    for (i = 0; i < PDFS_MAX_FILES; i++) {
-        if (s_rp[i].flags & PDFS_FLAG_USED) {
-            if (count == idx) {
-                pd_memcpy(out, &s_rp[i], sizeof(*out));
-                return 0;
-            }
-            count++;
-        }
-    }
-    return -1;
-}
-

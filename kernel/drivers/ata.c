@@ -231,8 +231,8 @@ int ata_read_sectors(uint32_t lba, uint8_t count, void *buf)
     return 0;
 }
 
-/* LBAs 0-199 hold the bootloader, stage2, and kernel image — never overwrite them. */
-#define ATA_RESERVED_LBA 200u
+/* LBAs 0-1023 hold the bootloader, stage2, and kernel image — never overwrite them. */
+#define ATA_RESERVED_LBA 1024u
 
 int ata_write_sectors(uint32_t lba, uint8_t count, const void *buf)
 {

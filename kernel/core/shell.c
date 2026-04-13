@@ -49,13 +49,14 @@ static void ww_draw(const char *buf, int count,
 static const char * const cmd_name_list[] = {
     "help","clear","print","version","uptime","color","whoami",
     "rammap","raminfo","heapinfo","diskinfo",
-    "list","read","write","delete","format","makedir",
+    "list","read","write","delete","factreset","makedir",
     "setperm","setowner","goto","copy","move","admin","alias",
-    "logout","reboot","shutdown","ps","kill",
+    "logout","reboot","shutdown","ps","kill","adduser","deluser",
+    "changerpass","changempass",
     /* aliases */
     "ls","dir","cat","type","rm","del","erase","mkdir","md","cd",
     "mv","ren","rename","echo","chmod","chown","sudo","runas","cls",
-    "exit","ver",
+    "exit","ver","useradd","userdel",
     NULL
 };
 
@@ -377,17 +378,14 @@ static void sug_update(char *buf, int count, int cursor,
                        uint8_t anchor_col, uint8_t anchor_row,
                        int *sug_active_p, int *sug_sel_p, int *sug_count_p,
                        char sug_items[][PDFS_NAME_LEN],
-                       int *sug_menu_row_p, int *sug_rows_p)
+                       int *sug_menu_row_p, int *sug_rows_p,
+                       uint16_t *sug_saved)
 {
     int i;
-    /* Clear existing menu */
+    /* Restore VGA content under old menu (instead of blanking) */
     if (*sug_active_p) {
-        int r;
-        for (r = 0; r < *sug_rows_p; r++) {
-            int row = *sug_menu_row_p + r;
-            if (row >= 0 && row < VGA_HEIGHT)
-                vga_clear_chars(0, (uint8_t)row, VGA_WIDTH);
-        }
+        if (*sug_rows_p > 0)
+            vga_restore_rows(*sug_menu_row_p, *sug_rows_p, sug_saved);
         *sug_active_p = 0;
         *sug_count_p  = 0;
         *sug_rows_p   = 0;
@@ -442,7 +440,8 @@ static void sug_update(char *buf, int count, int cursor,
     *sug_menu_row_p = menu_row;
     *sug_active_p   = 1;
 
-    /* Draw menu, restore cursor to input cursor pos */
+    /* Save rows that the menu will overwrite, then draw menu */
+    vga_save_rows(menu_row, mc, sug_saved);
     uint8_t cx, cy;
     ww_draw(buf, count, anchor_col, anchor_row, 0, cursor, &cx, &cy);
     *sug_rows_p = sug_draw_menu(sug_items, mc, *sug_sel_p, menu_row, cx, cy);
@@ -466,22 +465,19 @@ static int readline(char *buf, int len)
     hist_saved[0] = '\0';
 
     /* Suggestion menu state */
-    int  sug_active   = 0;
-    int  sug_sel      = -1;
-    int  sug_count    = 0;
-    char sug_items[SUG_MAX][PDFS_NAME_LEN];
-    int  sug_menu_row = 0;
-    int  sug_rows     = 0;
+    int      sug_active   = 0;
+    int      sug_sel      = -1;
+    int      sug_count    = 0;
+    char     sug_items[SUG_MAX][PDFS_NAME_LEN];
+    int      sug_menu_row = 0;
+    int      sug_rows     = 0;
+    uint16_t sug_saved[SUG_MAX * VGA_WIDTH]; /* VGA cells underneath the menu */
 
-/* Close the suggestion menu and blank its rows */
+/* Close the suggestion menu and restore the cells it was covering */
 #define SUG_CLOSE() do { \
     if (sug_active) { \
-        int _r; \
-        for (_r = 0; _r < sug_rows; _r++) { \
-            int _row = sug_menu_row + _r; \
-            if (_row >= 0 && _row < VGA_HEIGHT) \
-                vga_clear_chars(0, (uint8_t)_row, VGA_WIDTH); \
-        } \
+        if (sug_rows > 0) \
+            vga_restore_rows(sug_menu_row, sug_rows, sug_saved); \
         sug_active = 0; sug_sel = -1; sug_count = 0; sug_rows = 0; \
     } \
 } while(0)
@@ -571,7 +567,7 @@ static int readline(char *buf, int len)
                     vga_set_cursor(cx, cy);
                     sug_update(buf, count, cursor, anchor_col, anchor_row,
                                &sug_active, &sug_sel, &sug_count, sug_items,
-                               &sug_menu_row, &sug_rows);
+                               &sug_menu_row, &sug_rows, sug_saved);
                 }
             }
             continue;
@@ -699,7 +695,7 @@ static int readline(char *buf, int len)
             vga_set_cursor(cx, cy);
             sug_update(buf, count, cursor, anchor_col, anchor_row,
                        &sug_active, &sug_sel, &sug_count, sug_items,
-                       &sug_menu_row, &sug_rows);
+                       &sug_menu_row, &sug_rows, sug_saved);
         }
     }
 }
@@ -840,7 +836,7 @@ static void cmd_help(int argc, char *argv[])
     help_row("read <file>",          "Print file contents");
     help_row("write <f> <text>",     "Create or overwrite a file");
     help_row("delete <file>",        "Delete a file");
-    help_row("format",               "Format PDFS v2 (requires admin, erases all files)");
+    help_row("factreset",             "Factory reset PD-OS (requires admin, wipes all data)");
     help_row("makedir <dir>",        "Create a subdirectory");
     help_row("setperm <f> <oct>",    "Set file permissions (octal mode)");
     help_row("setowner <f> <u>:<g>", "Set file owner (e.g. setowner f.txt pd:pd, requires admin)");
@@ -852,8 +848,12 @@ static void cmd_help(int argc, char *argv[])
     help_row("logout",               "Log out and return to login screen");
     help_row("reboot",               "Reboot the system");
     help_row("shutdown",             "Shut the system down completely");
-    help_row("ps",                   "List running processes");
-    help_row("kill <pid>",           "Terminate a process by PID");
+    help_row("ps",                                    "List running processes");
+    help_row("kill <pid>",                            "Terminate a process by PID");
+    help_row("adduser <user> <admin|regular> <pass>", "Create a new user account");
+    help_row("deluser <user>",                        "Delete a user account (requires admin)");
+    help_row("changerpass",                           "Change root password (requires admin, root password only)");
+    help_row("changempass",                           "Change your own password (forces re-login)");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("\n");
 }
@@ -1139,9 +1139,18 @@ static void cmd_list(int argc, char *argv[])
     const char *dp = dir_path;
     while (*dp == '/') dp++;
 
+    pdfs_set_context(g_session_user, g_elevated);
+
     for (;;) {
         pdfs_dirent_t de;
-        if (pdfs_stat_dir(dp, count, &de) != 0) break;
+        int r = pdfs_stat_dir(dp, count, &de);
+        if (r == -4 && count == 0) {
+            vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            kprintf("  permission denied\n\n");
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            return;
+        }
+        if (r != 0) break;
         char mbuf[10];
         fmt_mode(de.mode, mbuf);
         kprintf("  ");
@@ -1268,17 +1277,35 @@ static void cmd_delete(int argc, char *argv[])
     }
 }
 
-static void cmd_format(int argc, char *argv[])
+static void cmd_factreset(int argc, char *argv[])
 {
+    char yn[4];
     (void)argc; (void)argv;
+
     /* Require elevated privileges */
     if (!g_elevated && !(g_session_user && (g_session_user->flags & USER_FLAG_ROOT))) {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        kprintf("  format: requires elevated privileges (use admin format)\n");
+        kprintf("  factreset: requires elevated privileges (use admin factreset)\n");
         vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
         return;
     }
-    kprintf("  Formatting PDFS v2 at LBA 200... ");
+
+    /* Confirmation prompt */
+    vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+    kprintf("\n  WARNING!!! This command will wipe all user data and factory\n");
+    kprintf("  reset this install. Only root and pd users will be registered,\n");
+    kprintf("  just like a new installation.\n\n");
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("  Are you sure you wish to proceed? (y/n): ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    readline_masked(yn, sizeof(yn));
+    if (yn[0] != 'y' && yn[0] != 'Y') {
+        kprintf("  factreset: aborted.\n");
+        return;
+    }
+
+    kprintf("  Formatting PDFS v3 at LBA 200... ");
     if (pdfs_format(200) != 0) {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         kprintf("FAILED\n");
@@ -1288,7 +1315,13 @@ static void cmd_format(int argc, char *argv[])
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     kprintf("done\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("  PDFS v2 formatted. Journal ready. All files erased.\n");
+    kprintf("  Building filesystem structure... ");
+    pdfs_scaffold();
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("done\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("  Factory reset complete. Logging out...\n");
+    g_logout = 1;
 }
 
 static void cmd_makedir(int argc, char *argv[])
@@ -1399,22 +1432,73 @@ static void cmd_goto(int argc, char *argv[])
 {
     char target[128];
 
-    /* sdir with no arg goes to ~ (home) */
+    /* No arg → go to home directory */
     if (argc < 2) {
         normalize_path("~", target);
     } else {
         normalize_path(argv[1], target);
     }
 
-    /* Root is always valid */
+    /* Access policy:
+     *  - true root (uid 0)      : unrestricted
+     *  - elevated admin         : unrestricted
+     *  - everyone else          : only /home and subdirectories */
+    int is_root_user      = (g_session_user && g_session_user->uid == 0);
+    int is_elevated_admin = (g_elevated && g_session_user &&
+                             (g_session_user->flags & USER_FLAG_ROOT));
+    if (!is_root_user && !is_elevated_admin) {
+        int inside_home = (target[0]=='/' && target[1]=='h' &&
+                           target[2]=='o' && target[3]=='m' &&
+                           target[4]=='e' &&
+                           (target[5]=='\0' || target[5]=='/'));
+        if (!inside_home) {
+            vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            kprintf("  goto: permission denied\n");
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            return;
+        }
+    }
+
+    /* Root dir shortcut - only reachable by root or elevated admins */
     if (target[0] == '/' && target[1] == '\0') {
         g_cwd[0] = '/'; g_cwd[1] = '\0';
         return;
     }
 
+    /* If the target is a strict prefix of the current cwd (navigating up with
+     * '..'), the directory is guaranteed to exist — skip the FS lookup and
+     * commit directly.  Policy checks above already enforce /home boundaries. */
+    {
+        int tlen = 0, clen = 0;
+        while (target[tlen]) tlen++;
+        while (g_cwd[clen])  clen++;
+        /* target must be shorter, match byte-for-byte, and cwd must have '/' next */
+        if (tlen < clen && tlen > 0) {
+            int match = 1, ki;
+            for (ki = 0; ki < tlen; ki++) {
+                if (target[ki] != g_cwd[ki]) { match = 0; break; }
+            }
+            if (match && (g_cwd[tlen] == '/' || g_cwd[tlen] == '\0')) {
+                int i = 0;
+                while (target[i] && i < 127) { g_cwd[i] = target[i]; i++; }
+                g_cwd[i] = '\0';
+                return;
+            }
+        }
+    }
+
     /* Verify the target exists and is a directory */
+    pdfs_set_context(g_session_user, g_elevated);
     vfs_node_t node;
-    if (vfs_open(target, &node) != 0 || !node.is_dir) {
+    int r = vfs_open(target, &node);
+    if (r == -4) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  goto: '%s': permission denied\n",
+                argc >= 2 ? argv[1] : "~");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    if (r != 0 || !node.is_dir) {
         vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
         kprintf("  goto: '%s': no such directory\n",
                 argc >= 2 ? argv[1] : "~");
@@ -1624,10 +1708,12 @@ static const alias_t aliases[] = {
     { "chown",  "setowner" },
     { "sudo",   "admin"    },
     { "runas",  "admin"    },
-    { "cls",    "clear"    },
-    { "exit",   "logout"   },
-    { "ver",    "version"  },
-    { NULL,     NULL       }
+    { "cls",     "clear"    },
+    { "exit",    "logout"   },
+    { "ver",     "version"  },
+    { "useradd", "adduser"  },
+    { "userdel", "deluser"  },
+    { NULL,      NULL       }
 };
 
 /* Grouped table — used only for display */
@@ -1651,6 +1737,8 @@ static const alias_group_t alias_groups[] = {
     { "cls",             "clear",    "Clear the screen"                          },
     { "exit",            "logout",   "Log out and return to the login screen"    },
     { "ver",             "version",  "Show kernel and shell version"             },
+    { "useradd",         "adduser",  "Create a new user account"                 },
+    { "userdel",         "deluser",  "Delete a user account"                     },
     { NULL,              NULL,       NULL                                         }
 };
 
@@ -1806,6 +1894,296 @@ static void cmd_kill(int argc, char *argv[])
     }
 }
 
+/* ---- adduser / deluser ---------------------------------------------------- */
+
+static void cmd_adduser(int argc, char *argv[])
+{
+    const user_t *nu;
+    uint8_t is_admin;
+    int r;
+
+    if (argc < 4) {
+        kprintf("  Usage: adduser <username> <admin|regular> <password>\n");
+        return;
+    }
+
+    is_admin = (sh_strcmp(argv[2], "admin") == 0) ? 1u : 0u;
+
+    /* Creating an admin account always requires elevation */
+    if (is_admin &&
+        !g_elevated &&
+        !(g_session_user && (g_session_user->flags & USER_FLAG_ROOT))) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  adduser: adding an admin requires elevated privileges\n");
+        kprintf("           use: admin adduser %s admin <password>\n", argv[1]);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    r = users_add(argv[1], is_admin, argv[3]);
+    if (r == -1) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  adduser: user table is full\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    if (r == -2) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  adduser: invalid username\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    if (r == -3) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  adduser: user '%s' already exists\n", argv[1]);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    if (r != 0) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  adduser: failed\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    /* Create home directory owned by the new user */
+    nu = users_get(argv[1]);
+    if (nu)
+        pdfs_create_home(argv[1], nu->uid);
+
+    /* Persist credentials to /usr/<uid>.pduc */
+    if (users_save_to_disk(argv[1]) != 0) {
+        vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        kprintf("  adduser: warning: could not save credentials to disk\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    }
+
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("  adduser: user '%s' created (%s)\n",
+            argv[1], is_admin ? "admin" : "regular");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+}
+
+static void cmd_deluser(int argc, char *argv[])
+{
+    int r;
+
+    if (argc < 2) {
+        kprintf("  Usage: deluser <username>\n");
+        return;
+    }
+
+    /* Requires elevation (run via admin deluser ...) */
+    if (!g_elevated &&
+        !(g_session_user && (g_session_user->flags & USER_FLAG_ROOT))) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  deluser: requires elevated privileges (use admin deluser <username>)\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    /* Cannot delete the root account */
+    if (sh_strcmp(argv[1], "root") == 0) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  deluser: cannot delete the root account\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    /* Cannot delete the currently logged-in user */
+    if (g_session_user && sh_strcmp(g_session_user->username, argv[1]) == 0) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  deluser: cannot delete the currently logged-in user\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    if (!users_get(argv[1])) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  deluser: user '%s' not found\n", argv[1]);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    r = users_remove(argv[1]);
+    if (r == -2) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  deluser: cannot delete the root account\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    if (r != 0) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  deluser: failed to remove '%s'\n", argv[1]);
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("  deluser: user '%s' removed\n", argv[1]);
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+}
+
+/* ---- changerpass / changempass -------------------------------------------- */
+/*
+ * changerpass: change the ROOT account password.
+ *   - Must be run via admin/sudo (g_elevated required).
+ *   - Asks for the CURRENT root password again internally, regardless of who
+ *     is calling — no other password is accepted.
+ *   - After success, if the session user is root, forces an immediate logout.
+ *
+ * changempass: change the calling user's OWN password.
+ *   - Any logged-in user may run this (no elevation needed).
+ *   - Asks for the caller's current password for verification.
+ *   - Forces logout after success to require a fresh login.
+ */
+
+static void cmd_changerpass(int argc, char *argv[])
+{
+    char cur[64], np1[64], np2[64];
+    (void)argc; (void)argv;
+
+    /* Must be run under admin/sudo (g_elevated) */
+    if (!g_elevated) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  changerpass: must be run with admin/sudo\n");
+        kprintf("               e.g. admin changerpass\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    /* Re-authenticate with the ROOT password — no other password accepted */
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("  [changerpass] current root password: ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    readline_masked(cur, sizeof(cur));
+
+    if (!users_verify("root", cur)) {
+        sh_memset(cur, 0, (int)sizeof(cur));
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  changerpass: authentication failure\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    sh_memset(cur, 0, (int)sizeof(cur));
+
+    /* New password (with confirmation) */
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("  [changerpass] new root password: ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    readline_masked(np1, sizeof(np1));
+
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("  [changerpass] confirm new password: ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    readline_masked(np2, sizeof(np2));
+
+    /* Compare np1 == np2 */
+    {
+        int i = 0;
+        while (np1[i] && np1[i] == np2[i]) i++;
+        if (np1[i] != np2[i]) {
+            sh_memset(np1, 0, (int)sizeof(np1));
+            sh_memset(np2, 0, (int)sizeof(np2));
+            vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            kprintf("  changerpass: passwords do not match\n");
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            return;
+        }
+    }
+
+    users_change_password("root", np1);
+    sh_memset(np1, 0, (int)sizeof(np1));
+    sh_memset(np2, 0, (int)sizeof(np2));
+
+    /* Persist the new root password hash to /usr/0.pduc */
+    if (users_save_to_disk("root") != 0) {
+        vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        kprintf("  changerpass: warning: password changed in memory but disk save failed\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    }
+
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("  changerpass: root password changed successfully\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    /* Force logout if the current session is root */
+    if (g_session_user && (g_session_user->flags & USER_FLAG_ROOT)) {
+        kprintf("  Security: logging out to enforce re-authentication...\n");
+        g_logout = 1;
+    }
+}
+
+static void cmd_changempass(int argc, char *argv[])
+{
+    char cur[64], np1[64], np2[64];
+    (void)argc; (void)argv;
+
+    if (!g_session_user) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  changempass: no active session\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    /* Verify current password of the calling user */
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("  [changempass] current password for %s: ",
+            g_session_user->username);
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    readline_masked(cur, sizeof(cur));
+
+    if (!users_verify(g_session_user->username, cur)) {
+        sh_memset(cur, 0, (int)sizeof(cur));
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  changempass: authentication failure\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    sh_memset(cur, 0, (int)sizeof(cur));
+
+    /* New password (with confirmation) */
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("  [changempass] new password: ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    readline_masked(np1, sizeof(np1));
+
+    vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+    kprintf("  [changempass] confirm new password: ");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    readline_masked(np2, sizeof(np2));
+
+    /* Compare np1 == np2 */
+    {
+        int i = 0;
+        while (np1[i] && np1[i] == np2[i]) i++;
+        if (np1[i] != np2[i]) {
+            sh_memset(np1, 0, (int)sizeof(np1));
+            sh_memset(np2, 0, (int)sizeof(np2));
+            vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            kprintf("  changempass: passwords do not match\n");
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            return;
+        }
+    }
+
+    users_change_password(g_session_user->username, np1);
+    sh_memset(np1, 0, (int)sizeof(np1));
+    sh_memset(np2, 0, (int)sizeof(np2));
+
+    /* Persist the new password hash to disk */
+    if (users_save_to_disk(g_session_user->username) != 0) {
+        vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        kprintf("  changempass: warning: password changed in memory but disk save failed\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    }
+
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("  changempass: password changed. Logging out for security...\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    g_logout = 1;
+}
+
 /* ---- Command table -------------------------------------------------------- */
 
 typedef struct {
@@ -1829,7 +2207,7 @@ static const command_t commands[] = {
     { "read",     cmd_read     },
     { "write",    cmd_write    },
     { "delete",   cmd_delete   },
-    { "format",   cmd_format   },
+    { "factreset", cmd_factreset },
     { "makedir",  cmd_makedir  },
     { "setperm",  cmd_setperm  },
     { "setowner", cmd_setowner },
@@ -1843,7 +2221,11 @@ static const command_t commands[] = {
     { "shutdown", cmd_shutdown },
     { "ps",       cmd_ps       },
     { "kill",     cmd_kill     },
-    { NULL,       NULL         }
+    { "adduser",     cmd_adduser     },
+    { "deluser",     cmd_deluser     },
+    { "changerpass", cmd_changerpass },
+    { "changempass", cmd_changempass },
+    { NULL,          NULL            }
 };
 
 /* ---- elev: privileged command dispatch ------------------------------------ */
@@ -1924,7 +2306,20 @@ void shell_run(const user_t *user)
 
     g_session_user = user;
     g_logout       = 0;
-    g_cwd[0] = '/'; g_cwd[1] = '\0';
+
+    /* Initial working directory:
+     *   root  (uid 0)  → / (literal filesystem root)
+     *   others         → /home/<username> */
+    if (user->uid == 0) {
+        g_cwd[0] = '/'; g_cwd[1] = '\0';
+    } else {
+        const char *pfx = "/home/";
+        int i = 0;
+        while (*pfx && i < 120) g_cwd[i++] = *pfx++;
+        int j = 0;
+        while (user->username[j] && i < 126) g_cwd[i++] = user->username[j++];
+        g_cwd[i] = '\0';
+    }
 
     vga_clear();
     shell_banner();

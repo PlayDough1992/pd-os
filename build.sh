@@ -140,30 +140,21 @@ build() {
     dd if="$KERNEL_BIN"      of="$DISK_IMAGE" conv=notrunc bs=512 seek=6          2>/dev/null
     echo -e "${GREEN}  [OK] Disk image: $DISK_IMAGE (64 MB)${NC}"
 
-    # --- PDFS v2 init at LBA 200 ---
-    # Layout:  LBA 200 = superblock (v2, 8 uint32 fields before reserved[119])
-    #          LBA 201 = journal sector (clean, reserved[0..1]=0)
-    #          LBA 202-205 = root dir (4 sectors, 32×64B dirents, all zeroed)
-    #          LBA 206+ = data
-    # Superblock fields: magic, version, dir_lba, dir_sectors, data_lba,
-    #                    next_free_lba, jrnl_lba   (7 × uint32)
-    # reserved[0..1] used as journal dirty+target → written as 0 here
-    echo -e "${CYAN}  [6] Initialising PDFS v2 at LBA 200...${NC}"
-    python3 -c "
-import struct, sys
-BASE = 200
-JRNL_LBA = BASE + 1              # 201
-DIR_LBA  = BASE + 2              # 202
-DIR_SECS = 4
-DATA_LBA = DIR_LBA + DIR_SECS   # 206
-# 7 uint32 header fields
-sb = struct.pack('<IIIIIII', 0x50444653, 2, DIR_LBA, DIR_SECS, DATA_LBA, DATA_LBA, JRNL_LBA)
-sb += b'\\x00' * (512 - len(sb))   # pad to 512 bytes (reserved[] all zero)
-journal = b'\\x00' * 512           # clean journal sector
-rootdir = b'\\x00' * (512 * DIR_SECS)  # 4 sectors, all dirents free
-sys.stdout.buffer.write(sb + journal + rootdir)
-" | dd of="$DISK_IMAGE" conv=notrunc bs=512 seek=200 2>/dev/null
-    echo -e "${GREEN}  [OK] PDFS v2 ready  (SB=200 jrnl=201 dir=202-205 data=206+)${NC}"
+    # --- PDFS area at LBA 1024: leave blank so the kernel auto-formats to v3 ---
+    # Kernel occupies LBA 6-1023 (max 320 KB via 5x128-sector stage2 reads).
+    # The kernel detects no valid PDFS magic on first boot, runs pdfs_format(1024)
+    # (v3), then pdfs_scaffold() to build the full FHS tree. No stale v2 header.
+    echo -e "${CYAN}  [6] Clearing PDFS area at LBA 1024 (kernel will auto-format to v3)...${NC}"
+    python3 -c "import sys; sys.stdout.buffer.write(b'\\x00' * (512 * 6))" \
+        | dd of="$DISK_IMAGE" conv=notrunc bs=512 seek=1024 2>/dev/null
+    echo -e "${GREEN}  [OK] PDFS area blank  (auto-format on first boot)${NC}"
+
+    # --- Stage 2 size check ---
+    S2SIZE=$(wc -c < "$STAGE2_BIN")
+    if [ "$S2SIZE" -gt 2560 ]; then
+        echo -e "${RED}[FAIL] Stage 2 is $S2SIZE bytes — exceeds 5-sector limit (2560 bytes)${NC}"
+        exit 1
+    fi
     # --- FAT32 init at LBA 2048 ---
     # Volume:  129024 sectors (LBA 2048-131071)
     # Layout:  32 reserved | FAT1(1000) | FAT2(1000) | data(127024)
