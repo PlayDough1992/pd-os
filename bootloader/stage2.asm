@@ -167,19 +167,22 @@ stage2_start:
     ; ------------------------------------------------------------------
     ; ------------------------------------------------------------------
     ; Load kernel using INT 13h Extended Read (AH=42h, LBA mode)
-    ; Split into two reads to avoid crossing the 64KB DMA boundary.
-    ;   Read 1: 128 sectors from LBA 6   -> 0x1000:0x0000 (physical 0x10000)
-    ;   Read 2:  32 sectors from LBA 134 -> 0x2000:0x0000 (physical 0x20000)
-    ; Total: 160 sectors = 80 KB
+    ; 5 reads of 128 sectors each = 640 sectors = 320 KB max
+    ;   Chunk 1: LBA 6   -> 0x1000:0x0000 (physical 0x10000)
+    ;   Chunk 2: LBA 134 -> 0x2000:0x0000 (physical 0x20000)
+    ;   Chunk 3: LBA 262 -> 0x3000:0x0000 (physical 0x30000)
+    ;   Chunk 4: LBA 390 -> 0x4000:0x0000 (physical 0x40000)
+    ;   Chunk 5: LBA 518 -> 0x5000:0x0000 (physical 0x50000)
+    ; PDFS starts at LBA 1024 (well past last chunk at LBA 645)
     ; ------------------------------------------------------------------
     mov  si, msg_kernel_load
     call print_color_str
 
-    ; --- First read: 128 sectors (64 KB) ---
-    mov  word  [dap_count],   128    ; 128 sectors = 64 KB
-    mov  word  [dap_offset],  0x0000 ; buffer: 0x1000:0x0000 = physical 0x10000
+    ; --- Chunk 1: 128 sectors at LBA 7 ---
+    mov  word  [dap_count],   128    ; 128 sectors = 64 KB (fixed for all chunks)
+    mov  word  [dap_offset],  0x0000 ; offset always 0
     mov  word  [dap_segment], 0x1000
-    mov  dword [dap_lba_lo],  6      ; kernel starts at LBA 6
+    mov  dword [dap_lba_lo],  7
     mov  dword [dap_lba_hi],  0
     mov  ah, 0x42
     mov  dl, [boot_drive]
@@ -187,12 +190,36 @@ stage2_start:
     int  0x13
     jc   .kernel_err
 
-    ; --- Second read: 32 sectors (16 KB) into next 64KB page ---
-    mov  word  [dap_count],   32     ; 32 sectors = 16 KB
-    mov  word  [dap_offset],  0x0000 ; buffer: 0x2000:0x0000 = physical 0x20000
+    ; --- Chunk 2: 128 sectors at LBA 135 ---
     mov  word  [dap_segment], 0x2000
-    mov  dword [dap_lba_lo],  134    ; LBA 6 + 128
-    mov  dword [dap_lba_hi],  0
+    mov  dword [dap_lba_lo],  135
+    mov  ah, 0x42
+    mov  dl, [boot_drive]
+    mov  si, dap
+    int  0x13
+    jc   .kernel_err
+
+    ; --- Chunk 3: 128 sectors at LBA 263 ---
+    mov  word  [dap_segment], 0x3000
+    mov  dword [dap_lba_lo],  263
+    mov  ah, 0x42
+    mov  dl, [boot_drive]
+    mov  si, dap
+    int  0x13
+    jc   .kernel_err
+
+    ; --- Chunk 4: 128 sectors at LBA 391 ---
+    mov  word  [dap_segment], 0x4000
+    mov  dword [dap_lba_lo],  391
+    mov  ah, 0x42
+    mov  dl, [boot_drive]
+    mov  si, dap
+    int  0x13
+    jc   .kernel_err
+
+    ; --- Chunk 5: 128 sectors at LBA 519 ---
+    mov  word  [dap_segment], 0x5000
+    mov  dword [dap_lba_lo],  519
     mov  ah, 0x42
     mov  dl, [boot_drive]
     mov  si, dap
@@ -218,10 +245,42 @@ stage2_start:
     call print_color_str
 .e820_cont:
 
-    lgdt [gdt_descriptor]
+    ; ---- Copy VGA BIOS 8x16 font to 0x3000 (before switching video mode) ---
+    mov  ax, 0x1130
+    mov  bh, 0x06           ; 8x16 font pointer -> ES:BP
+    int  0x10
+    push es
+    push ds
+    push si
+    push di
+    push cx
+    push ax
+    mov  ax, es             ; source segment = ES (from INT 10h result)
+    mov  ds, ax
+    mov  si, bp             ; source offset  = BP
+    xor  ax, ax
+    mov  es, ax             ; destination segment = 0
+    mov  di, 0x3000         ; destination = physical 0x3000
+    mov  cx, 2048           ; 256 chars * 8 bytes per row (we'll treat as 8x8 pairs)
+                            ; actually copy 4096 bytes (256 * 16) for full 8x16 font
+    mov  cx, 4096
+    rep  movsb
+    pop  ax
+    pop  cx
+    pop  di
+    pop  si
+    pop  ds
+    pop  es
 
-    mov  si, msg_gdt_ok
-    call print_color_str
+    ; ---- Set VBE graphics mode 0x119 (1024x768x32bpp LFB) -----------------
+    call do_vbe
+
+    ; Load GDT from the safe copy at 0x0618 (written by do_vbe after all BIOS calls).
+    ; The original gdt_descriptor in stage2 at 0x8690 may have been corrupted by
+    ; the VESA BIOS, which is known to overwrite memory in the 0x8000 range.
+    ; IMPORTANT: no BIOS calls (INT instructions) must occur between lgdt and
+    ; the far jump into protected mode — BIOS handlers corrupt low memory.
+    lgdt [0x0618]
 
     cli
     mov  eax, cr0
@@ -240,7 +299,8 @@ stage2_start:
     jmp  hang
 
 ; ===========================================================================
-;  32-bit protected mode — copy kernel from 0x10000 to 0x100000, then jump
+;  32-bit protected mode — copy kernel from staging buffers to above 1 MB
+;  0x10000..0x50000 (5 x 64 KB) -> 0x100000..0x150000, then jump
 ; ===========================================================================
 [BITS 32]
 pm_entry:
@@ -252,16 +312,30 @@ pm_entry:
     mov  ss, ax
     mov  esp, 0x9FC00           ; kernel stack (below BIOS data area)
 
-    ; Copy kernel chunk 1: 0x10000 -> 0x100000  (128 sectors = 65536 bytes = 16384 dwords)
+    ; Copy 5 x 128-sector chunks (65536 bytes = 16384 dwords each)
     mov  esi, 0x10000
     mov  edi, 0x100000
     mov  ecx, 16384
     rep  movsd
 
-    ; Copy kernel chunk 2: 0x20000 -> 0x110000  (32 sectors = 16384 bytes = 4096 dwords)
     mov  esi, 0x20000
     mov  edi, 0x110000
-    mov  ecx, 4096
+    mov  ecx, 16384
+    rep  movsd
+
+    mov  esi, 0x30000
+    mov  edi, 0x120000
+    mov  ecx, 16384
+    rep  movsd
+
+    mov  esi, 0x40000
+    mov  edi, 0x130000
+    mov  ecx, 16384
+    rep  movsd
+
+    mov  esi, 0x50000
+    mov  edi, 0x140000
+    mov  ecx, 16384
     rep  movsd
 
     ; Jump to kernel entry point
@@ -487,6 +561,284 @@ hang:
     cli
 .h: hlt
     jmp .h
+
+; ---------------------------------------------------------------------------
+;  do_vbe  -  set VBE 1024×768×32bpp LFB mode, query real pitch/fbaddr,
+;             write boot_info to 0x4000, then write GDT to 0x0600.
+;
+;  Memory layout used:
+;    0x3000  VGA BIOS 8×16 font  (4096 bytes, copied before call)
+;    0x4000  boot_info_t         (64 bytes, written here)
+;    0x7000  VBE ModeInfoBlock   (256 bytes, mode query scratch)
+;    0x7200  VBE ControllerInfo  (512 bytes, mode-list scan scratch)
+;
+;  Strategy:
+;    Phase 1 — scan BIOS VBE mode list (INT 10h 4F00h / 4F01h / 4F02h)
+;              Finds the correct 1024×768×32bpp LFB mode on any real
+;              hardware by matching XRes/YRes/BPP/LFB in the mode table.
+;    Phase 2 — Bochs VBE I/O-port fallback (QEMU only).
+;              Sets mode via ports 0x01CE/0x01CF, then queries the now-
+;              live mode via INT 10h 4F03h → 4F01h to get PhysBasePtr.
+;    Phase 3 — hard-coded fallback (0xFD000000 / pitch=4096).
+; ---------------------------------------------------------------------------
+do_vbe:
+    pushad
+    push es
+    push ds
+
+    xor  ax, ax
+    mov  es, ax
+    mov  ds, ax
+
+    ; Zero boot_info block at 0x4000 (64 bytes = 32 words)
+    mov  di, 0x4000
+    mov  cx, 32
+    rep  stosw
+
+    ; Mark font present (VGA BIOS 8×16 font copied to 0x3000 before this call)
+    mov  byte [es:0x4011], 1
+
+    ; ==================================================================
+    ; Phase 1 — INT 10h VBE mode scan (real hardware + QEMU with BIOS)
+    ;
+    ; Write "VBE2" into the info block so the BIOS fills VBE 2.0 fields
+    ; (including the full VideoModePtr and per-mode LFB capability bit).
+    ; ==================================================================
+    mov  dword [es:0x7200], 0x32454256   ; "VBE2"
+
+    mov  ax, 0x4F00         ; Get VBE Controller Info
+    mov  di, 0x7200         ; ES:DI = 0:0x7200 → ControllerInfoBlock
+    int  0x10
+
+    xor  bx, bx
+    mov  es, bx
+    mov  ds, bx
+
+    cmp  ax, 0x004F
+    jne  .phase2            ; VBE 2.0 not available → Bochs ports
+
+    ; VideoModePtr (a real-mode far pointer) is at ControllerInfoBlock + 0x0E.
+    ; Physical address = segment × 16 + offset.
+    movzx esi, word [0x720E]            ; mode list offset
+    movzx eax, word [0x7210]            ; mode list segment
+    shl   eax, 4
+    add   esi, eax                      ; esi = flat address of mode list
+
+.scan_next:
+    movzx ecx, word [esi]               ; next mode number (0xFFFF = end)
+    cmp   cx, 0xFFFF
+    je    .phase2                       ; end of list, no match
+    add   esi, 2
+
+    ; Query mode info — INT 10h may clobber ESI/ECX; save them.
+    push  esi
+    push  ecx
+
+    xor  bx, bx
+    mov  es, bx
+    mov  ax, 0x4F01         ; cx = mode number (already set)
+    mov  di, 0x7000         ; ModeInfoBlock at 0x7000
+    int  0x10
+
+    xor  bx, bx
+    mov  es, bx
+    mov  ds, bx
+
+    pop  ecx                ; restore mode number
+    pop  esi                ; restore list pointer
+
+    cmp  ax, 0x004F
+    jne  .scan_next
+
+    ; Require: XResolution == 1024 (offset 0x12)
+    cmp  word [0x7012], 1024
+    jne  .scan_next
+
+    ; Require: YResolution == 768 (offset 0x14)
+    cmp  word [0x7014], 768
+    jne  .scan_next
+
+    ; Require: BitsPerPixel == 32 (offset 0x19)
+    cmp  byte [0x7019], 32
+    jne  .scan_next
+
+    ; Require: ModeAttributes bit 7 set = LFB supported (offset 0x00)
+    test word [0x7000], 0x0080
+    jz   .scan_next
+
+    ; ---- Match found.  Set the mode (ECX = mode number). ----
+    push  ecx
+    mov  ax, 0x4F02
+    mov  bx, cx
+    or   bx, 0x4000         ; set LFB enable flag
+    int  0x10
+
+    xor  bx, bx
+    mov  es, bx
+    mov  ds, bx
+
+    pop  ecx
+    cmp  ax, 0x004F
+    jne  .scan_next         ; set failed → try next candidate mode
+
+    ; Re-query mode info after mode is live (PhysBasePtr finalised).
+    push  ecx
+    mov  ax, 0x4F01
+    mov  di, 0x7000
+    ; cx = mode number (ecx low half)
+    int  0x10
+
+    xor  bx, bx
+    mov  es, bx
+    mov  ds, bx
+
+    pop  ecx
+    cmp  ax, 0x004F
+    jne  .phase3
+
+    mov  eax, dword [0x7028]  ; PhysBasePtr
+    test eax, eax
+    jnz  .got_pitch
+    jmp  .phase3
+
+    ; ==================================================================
+    ; Phase 2 — Bochs VBE I/O-port fallback (QEMU / Bochs emulator)
+    ;
+    ; Programs the Bochs VBE device registers directly.  After enabling,
+    ; INT 10h 4F03h returns the now-active mode number so we can query
+    ; PhysBasePtr via INT 10h 4F01h without hardcoding an address.
+    ; ==================================================================
+.phase2:
+    ; Disable VBE before reconfiguring
+    mov  dx, 0x01CE
+    mov  ax, 0x0004         ; INDEX_ENABLE
+    out  dx, ax
+    mov  dx, 0x01CF
+    xor  ax, ax
+    out  dx, ax
+
+    ; Set XRES = 1024
+    mov  dx, 0x01CE
+    mov  ax, 0x0001
+    out  dx, ax
+    mov  dx, 0x01CF
+    mov  ax, 1024
+    out  dx, ax
+
+    ; Set YRES = 768
+    mov  dx, 0x01CE
+    mov  ax, 0x0002
+    out  dx, ax
+    mov  dx, 0x01CF
+    mov  ax, 768
+    out  dx, ax
+
+    ; Set BPP = 32
+    mov  dx, 0x01CE
+    mov  ax, 0x0003
+    out  dx, ax
+    mov  dx, 0x01CF
+    mov  ax, 32
+    out  dx, ax
+
+    ; Enable with LFB: ENABLED(0x01) | LFB_ENABLED(0x40)
+    mov  dx, 0x01CE
+    mov  ax, 0x0004
+    out  dx, ax
+    mov  dx, 0x01CF
+    mov  ax, 0x0041
+    out  dx, ax
+
+    ; Get current VBE mode number: INT 10h AX=4F03h → BX = mode
+    mov  ax, 0x4F03
+    int  0x10
+
+    xor  dx, dx
+    mov  es, dx
+    mov  ds, dx
+
+    cmp  ax, 0x004F
+    jne  .phase3
+
+    and  bx, 0x01FF         ; strip LFB / no-clear bits
+    jz   .phase3            ; mode = 0 means not set
+
+    ; Query live mode info → PhysBasePtr + pitch
+    mov  cx, bx
+    mov  ax, 0x4F01
+    mov  di, 0x7000
+    int  0x10
+
+    xor  bx, bx
+    mov  es, bx
+    mov  ds, bx
+
+    cmp  ax, 0x004F
+    jne  .phase3
+
+    mov  eax, dword [0x7028]  ; PhysBasePtr
+    test eax, eax
+    jz   .phase3
+
+.got_pitch:
+    movzx ecx, word [0x7010]  ; BytesPerScanLine
+    test  ecx, ecx
+    jz    .fix_pitch
+    cmp   ecx, 65536          ; reject implausibly large values
+    ja    .fix_pitch
+    jmp   .have_fb
+
+.fix_pitch:
+    mov  ecx, 4096            ; default: 1024 pixels × 4 bytes
+
+    ; ==================================================================
+    ; Phase 3 — hard-coded fallback
+    ; ==================================================================
+.phase3:
+    mov  eax, 0xFD000000      ; QEMU stdvga LFB default
+    mov  ecx, 4096
+
+    ; ==================================================================
+    ; Write boot_info at physical 0x4000
+    ; eax = framebuffer physical base address
+    ; ecx = bytes per scan line (pitch)
+    ; ==================================================================
+.have_fb:
+    xor  bx, bx
+    mov  es, bx
+    mov  dword [es:0x4000], 0xB0075E00   ; magic
+    mov  dword [es:0x4004], eax          ; vbe_fb
+    mov  word  [es:0x4008], 1024         ; vbe_width
+    mov  word  [es:0x400A], 768          ; vbe_height
+    mov  word  [es:0x400C], 32           ; vbe_bpp
+    mov  word  [es:0x400E], cx           ; vbe_pitch
+    mov  byte  [es:0x4010], 1            ; vbe_ok
+
+    ; ==================================================================
+    ; Write GDT to 0x0600 and gdtr to 0x0618 — must happen AFTER every
+    ; BIOS call because the VESA BIOS corrupts the 0x8000 region where
+    ; the GDT originally lives.  Written as immediates so there is no
+    ; source buffer that can be corrupted.
+    ; Layout:  null (0x00) | code 0x08 | data 0x10
+    ; gdtr:    limit=23, base=0x00000600
+    ; ==================================================================
+    mov  dword [es:0x0600], 0x00000000   ; null descriptor (low)
+    mov  dword [es:0x0604], 0x00000000   ;                 (high)
+    mov  dword [es:0x0608], 0x0000FFFF   ; code: limit low
+    mov  dword [es:0x060C], 0x00CF9A00   ; code: base/flags
+    mov  dword [es:0x0610], 0x0000FFFF   ; data: limit low
+    mov  dword [es:0x0614], 0x00CF9200   ; data: base/flags
+    mov  word  [es:0x0618], 0x0017       ; gdtr limit = 23
+    mov  dword [es:0x061A], 0x00000600   ; gdtr base
+
+    pop  ds
+    pop  es
+    popad
+    ret
+
+; vbe_ok stays 0 only if stage2 never reaches the boot_info write above
+; (both the INT 10h and Bochs-port paths are tried in sequence).
+
 
 ; ===========================================================================
 ;  VGA direct-write screen drawing

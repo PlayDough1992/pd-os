@@ -47,3 +47,6 @@ void vga_scroll_down(int lines);
 void vga_scroll_reset(void);
 int  vga_get_scroll_count(void);
 void vga_clear_chars(uint8_t start_col, uint8_t start_row, int n);
+void vga_save_rows(int start_row, int nrows, uint16_t *dst);
+void vga_restore_rows(int start_row, int nrows, const uint16_t *src);
+void vga_set_hook(void (*fn)(char));  /* NULL = normal VGA output */

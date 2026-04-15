@@ -29,7 +29,7 @@ start:
     mov es, ax                 ; load buffer segment
     mov bx, 0x8000             ; load buffer offset  → linear 0x8000
     mov ah, 0x02               ; BIOS: read sectors
-    mov al, 5                  ; number of sectors to read (5 * 512 = 2560 bytes)
+    mov al, 6                  ; number of sectors to read (6 * 512 = 3072 bytes)
     mov ch, 0                  ; cylinder 0
     mov cl, 2                  ; starting sector 2 (sector 1 = this MBR)
     mov dh, 0                  ; head 0

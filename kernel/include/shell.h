@@ -15,3 +15,7 @@
  * Returns when the user runs 'logout'.
  */
 void shell_run(const user_t *user);
+
+/* Execute a single command line string in the context of a given user.
+ * All output goes via kprintf (redirect with vga_set_hook if needed). */
+void shell_exec_line(const user_t *user, const char *line);

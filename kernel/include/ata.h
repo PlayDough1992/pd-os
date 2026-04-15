@@ -58,3 +58,24 @@ int ata_read_sectors(uint32_t lba, uint8_t count, void *buf);
  * Returns  0 on success, -1 on error.
  */
 int ata_write_sectors(uint32_t lba, uint8_t count, const void *buf);
+
+/* ---------- Multi-drive support (primary channel master + slave) ---------- */
+#define ATA_MAX_DRIVES  2
+
+/*
+ * Probe all ATA drives on the primary channel (master = 0, slave = 1).
+ * Results accessible via ata_get_drive_n().
+ */
+void ata_probe_all(void);
+
+/* Return info for drive index n (0=master, 1=slave).  NULL if n out of range. */
+const ata_drive_t *ata_get_drive_n(int n);
+
+/* Read from a specific drive index (uses g_drives[] populated by ata_probe_all). */
+int ata_read_sectors_drv(int drv, uint32_t lba, uint8_t count, void *buf);
+
+/*
+ * Raw write to a specific drive index — NO LBA guard.
+ * Intended only for the installer which must overwrite the boot sectors.
+ */
+int ata_write_sectors_raw(int drv, uint32_t lba, uint8_t count, const void *buf);

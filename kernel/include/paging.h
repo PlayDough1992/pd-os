@@ -26,6 +26,9 @@
 #define PAGE_PRESENT   (1u << 0)        /* P  — entry is valid               */
 #define PAGE_WRITABLE  (1u << 1)        /* R/W — read+write                  */
 #define PAGE_USER      (1u << 2)        /* U/S — user-mode accessible        */
+#define PAGE_LARGE     (1u << 7)        /* PS  — 4 MB large page (PSE)       */
+#define PAGE_PWT       (1u << 3)        /* PWT — write-through               */
+#define PAGE_PCD       (1u << 4)        /* PCD — cache disable               */
 
 /*
  * Initialise paging.
@@ -38,3 +41,10 @@
  * Must be called AFTER pmm_init() (so the PMM knows which frames are used).
  */
 void paging_init(void);
+
+/*
+ * Map a physical framebuffer address into virtual address space.
+ * Uses a 4 MB PSE large page entry; fb_addr is rounded down to 4 MB alignment.
+ * Must be called AFTER paging_init().
+ */
+void paging_map_framebuffer(uint32_t fb_addr);

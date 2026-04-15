@@ -13,6 +13,14 @@ static uint8_t vga_col  = 0;
 static uint8_t vga_row  = 0;
 static uint8_t vga_attr = 0x07; /* white on black */
 
+/* Optional output hook — when set, vga_putchar forwards here instead */
+static void (*g_putchar_hook)(char) = (void*)0;
+
+void vga_set_hook(void (*fn)(char))
+{
+    g_putchar_hook = fn;
+}
+
 /* ---- Scrollback buffer ---------------------------------------------------- */
 #define SB_LINES 200
 static uint16_t g_screen[VGA_HEIGHT][VGA_WIDTH];  /* shadow of live display  */
@@ -147,6 +155,7 @@ static void scroll(void)
 void vga_putchar(char c)
 {
     uint16_t entry;
+    if (g_putchar_hook) { g_putchar_hook(c); return; }
     if (c == '\n') {
         vga_col = 0;
         if (++vga_row >= VGA_HEIGHT) scroll(); /* scroll() redraws + syncs */
@@ -282,4 +291,26 @@ void vga_clear_chars(uint8_t start_col, uint8_t start_row, int n)
         if (g_sb_off == 0)
             VGA_BUFFER[p] = blank;
     }
+}
+
+/* Copy nrows full rows from the shadow buffer into dst (row-major, 80 cells/row). */
+void vga_save_rows(int start_row, int nrows, uint16_t *dst)
+{
+    int r, c;
+    for (r = 0; r < nrows && (start_row + r) < VGA_HEIGHT; r++)
+        for (c = 0; c < VGA_WIDTH; c++)
+            dst[r * VGA_WIDTH + c] = g_screen[start_row + r][c];
+}
+
+/* Write nrows full rows from src back into the shadow buffer and VGA hardware. */
+void vga_restore_rows(int start_row, int nrows, const uint16_t *src)
+{
+    int r, c;
+    for (r = 0; r < nrows && (start_row + r) < VGA_HEIGHT; r++)
+        for (c = 0; c < VGA_WIDTH; c++) {
+            uint16_t v = src[r * VGA_WIDTH + c];
+            g_screen[start_row + r][c] = v;
+            if (g_sb_off == 0)
+                VGA_BUFFER[(start_row + r) * VGA_WIDTH + c] = v;
+        }
 }
