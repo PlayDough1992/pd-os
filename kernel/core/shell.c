@@ -16,6 +16,10 @@
 #include "vfs.h"
 #include "pdfs.h"
 #include "process.h"
+#include "install.h"
+#include "rtl8139.h"
+#include "net.h"
+#include "arp.h"
 
 /* ---- Session state -------------------------------------------------------- */
 
@@ -48,11 +52,11 @@ static void ww_draw(const char *buf, int count,
  * Must stay in sync with commands[] and aliases[]. */
 static const char * const cmd_name_list[] = {
     "help","clear","print","version","uptime","color","whoami",
-    "rammap","raminfo","heapinfo","diskinfo",
+    "rammap","raminfo","heapinfo","diskinfo","nettest","netinfo",
     "list","read","write","delete","factreset","makedir",
     "setperm","setowner","goto","copy","move","admin","alias",
     "logout","reboot","shutdown","ps","kill","adduser","deluser",
-    "changerpass","changempass",
+    "changerpass","changempass","install",
     /* aliases */
     "ls","dir","cat","type","rm","del","erase","mkdir","md","cd",
     "mv","ren","rename","echo","chmod","chown","sudo","runas","cls",
@@ -832,6 +836,8 @@ static void cmd_help(int argc, char *argv[])
     help_row("raminfo",              "Show memory usage (free/used/total)");
     help_row("heapinfo",             "Show kernel heap stats");
     help_row("diskinfo",             "Show ATA drive info and layout");
+    help_row("nettest",              "Send ARP broadcast and dump any reply (RTL8139 smoke test)");
+    help_row("netinfo",              "Show network configuration (IP, MAC, gateway, DNS)");
     help_row("list",                 "List files on PDFS");
     help_row("read <file>",          "Print file contents");
     help_row("write <f> <text>",     "Create or overwrite a file");
@@ -973,6 +979,196 @@ static void cmd_heapinfo(int argc, char *argv[])
     kprintf("    Used:   %u bytes  (%u KB)\n", used_b, used_b / 1024u);
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
     kprintf("    Blocks: %u\n\n", blocks);
+}
+
+/* ---- netinfo ------------------------------------------------------------- */
+
+static void cmd_netinfo(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+    kprintf("\n  Network Configuration\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    if (!rtl8139_present()) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  No RTL8139 detected\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        kprintf("\n");
+        return;
+    }
+
+    uint8_t mac[6];
+    rtl8139_get_mac(mac);
+
+    /* MAC */
+    kprintf("  MAC     : %x:%x:%x:%x:%x:%x\n",
+            (uint32_t)mac[0], (uint32_t)mac[1], (uint32_t)mac[2],
+            (uint32_t)mac[3], (uint32_t)mac[4], (uint32_t)mac[5]);
+
+    /* IPs (static SLIRP config) */
+    uint32_t self = NET_IP_SELF;
+    uint32_t gw   = NET_IP_GW;
+    uint32_t dns  = NET_IP_DNS;
+    uint32_t mask = NET_MASK;
+    kprintf("  IP      : %u.%u.%u.%u\n",
+            (self >> 24) & 0xFFu, (self >> 16) & 0xFFu,
+            (self >>  8) & 0xFFu,  self        & 0xFFu);
+    kprintf("  Mask    : %u.%u.%u.%u\n",
+            (mask >> 24) & 0xFFu, (mask >> 16) & 0xFFu,
+            (mask >>  8) & 0xFFu,  mask        & 0xFFu);
+    kprintf("  Gateway : %u.%u.%u.%u\n",
+            (gw >> 24) & 0xFFu, (gw >> 16) & 0xFFu,
+            (gw >>  8) & 0xFFu,  gw        & 0xFFu);
+    kprintf("  DNS     : %u.%u.%u.%u\n",
+            (dns >> 24) & 0xFFu, (dns >> 16) & 0xFFu,
+            (dns >>  8) & 0xFFu,  dns       & 0xFFu);
+
+    /* Resolve gateway MAC from ARP cache */
+    uint8_t gw_mac[6];
+    if (arp_resolve(NET_IP_GW, gw_mac)) {
+        vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+        kprintf("  GW MAC  : %x:%x:%x:%x:%x:%x  (ARP OK)\n",
+                (uint32_t)gw_mac[0], (uint32_t)gw_mac[1],
+                (uint32_t)gw_mac[2], (uint32_t)gw_mac[3],
+                (uint32_t)gw_mac[4], (uint32_t)gw_mac[5]);
+    } else {
+        vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        kprintf("  GW MAC  : unresolved\n");
+    }
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+    kprintf("\n");
+}
+
+/* ---- nettest ------------------------------------------------------------- */
+
+#define ETH_ETYPE_ARP  0x0806u
+
+static void cmd_nettest(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    if (!rtl8139_present()) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  nettest: no RTL8139 detected\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    uint8_t mac[6];
+    rtl8139_get_mac(mac);
+
+    vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
+    kprintf("\n  RTL8139 present\n");
+    kprintf("  MAC: %x:%x:%x:%x:%x:%x\n",
+            (uint32_t)mac[0], (uint32_t)mac[1], (uint32_t)mac[2],
+            (uint32_t)mac[3], (uint32_t)mac[4], (uint32_t)mac[5]);
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    /* Build a gratuitous ARP request (opcode 1) as a broadcast.
+     * This makes QEMU's SLIRP respond with an ARP reply, which proves
+     * TX, ISR, and RX all work without needing an IP stack.             */
+    uint8_t frame[42];
+    int     i;
+    for (i = 0; i < 42; i++) frame[i] = 0;
+
+    /* -- Ethernet header -- */
+    /* Destination: broadcast ff:ff:ff:ff:ff:ff */
+    for (i = 0; i < 6; i++) frame[i] = 0xFFu;
+    /* Source: our MAC */
+    for (i = 0; i < 6; i++) frame[6 + i] = mac[i];
+    /* EtherType: ARP (0x0806) big-endian */
+    frame[12] = 0x08u;
+    frame[13] = 0x06u;
+
+    /* -- ARP payload (28 bytes at offset 14) -- */
+    /* HTYPE = Ethernet (1) */
+    frame[14] = 0x00u; frame[15] = 0x01u;
+    /* PTYPE = IPv4 (0x0800) */
+    frame[16] = 0x08u; frame[17] = 0x00u;
+    /* HLEN = 6, PLEN = 4 */
+    frame[18] = 6u; frame[19] = 4u;
+    /* OPER = request (1) */
+    frame[20] = 0x00u; frame[21] = 0x01u;
+    /* SHA = sender hardware address (our MAC) */
+    for (i = 0; i < 6; i++) frame[22 + i] = mac[i];
+    /* SPA = sender protocol address: 10.0.2.15 (QEMU SLIRP default) */
+    frame[28] = 10u; frame[29] = 0u; frame[30] = 2u; frame[31] = 15u;
+    /* THA = target hardware address: zeros (unknown) */
+    for (i = 0; i < 6; i++) frame[32 + i] = 0x00u;
+    /* TPA = target protocol address: 10.0.2.2 (QEMU SLIRP gateway) */
+    frame[38] = 10u; frame[39] = 0u; frame[40] = 2u; frame[41] = 2u;
+
+    kprintf("  Sending ARP request to 10.0.2.2 (QEMU gateway)...\n");
+    if (rtl8139_send(frame, 42) != 0) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  TX failed\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("  TX OK\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    /* Wait up to ~500 ms (50 ticks @ 100 Hz) for a reply */
+    uint32_t deadline = pit_get_ticks() + 50u;
+    uint8_t  rxbuf[NET_MTU];
+    uint16_t rxlen = 0;
+    int      got_reply = 0;
+
+    while (pit_get_ticks() < deadline) {
+        if (rtl8139_recv(rxbuf, &rxlen)) {
+            got_reply = 1;
+            break;
+        }
+    }
+
+    if (!got_reply) {
+        vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        kprintf("  No reply received within 500 ms\n");
+        kprintf("  (Add -netdev user,id=net0 -device rtl8139,netdev=net0 to QEMU for SLIRP)\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("  RX OK  (%u bytes)\n", (uint32_t)rxlen);
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    /* Dump the first 28 bytes of the received frame in hex rows of 14 */
+    kprintf("  Raw frame dump (first %u bytes):\n",
+            rxlen < 28u ? (uint32_t)rxlen : 28u);
+    uint16_t dump_len = rxlen < 28u ? rxlen : 28u;
+    uint16_t j;
+    for (j = 0; j < dump_len; j++) {
+        if (j % 14u == 0) kprintf("    ");
+        kprintf("%x ", (uint32_t)rxbuf[j]);
+        if ((j + 1u) % 14u == 0) kprintf("\n");
+    }
+    if (dump_len % 14u != 0) kprintf("\n");
+
+    /* Interpret EtherType */
+    if (rxlen >= 14u) {
+        uint16_t etype = ((uint16_t)rxbuf[12] << 8) | rxbuf[13];
+        if (etype == ETH_ETYPE_ARP) {
+            uint16_t op = ((uint16_t)rxbuf[20] << 8) | rxbuf[21];
+            vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            kprintf("  EtherType: ARP  opcode=%u (%s)\n",
+                    (uint32_t)op,
+                    op == 2u ? "reply" : op == 1u ? "request" : "?");
+            if (op == 2u && rxlen >= 42u) {
+                kprintf("  Replier MAC: %x:%x:%x:%x:%x:%x\n",
+                        (uint32_t)rxbuf[22], (uint32_t)rxbuf[23],
+                        (uint32_t)rxbuf[24], (uint32_t)rxbuf[25],
+                        (uint32_t)rxbuf[26], (uint32_t)rxbuf[27]);
+            }
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        } else {
+            kprintf("  EtherType: 0x%x\n", (uint32_t)etype);
+        }
+    }
+    kprintf("\n");
 }
 
 static void cmd_diskinfo(int argc, char *argv[])
@@ -2184,6 +2380,25 @@ static void cmd_changempass(int argc, char *argv[])
     g_logout = 1;
 }
 
+/* ---- install -------------------------------------------------------------- */
+
+static void cmd_install(int argc, char *argv[])
+{
+    (void)argc; (void)argv;
+
+    /* Requires root or elevated privileges */
+    if (!g_elevated &&
+        !(g_session_user && (g_session_user->flags & USER_FLAG_ROOT))) {
+        vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+        kprintf("  install: requires elevated privileges\n");
+        kprintf("           use: admin install\n");
+        vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        return;
+    }
+
+    install_wizard();
+}
+
 /* ---- Command table -------------------------------------------------------- */
 
 typedef struct {
@@ -2203,6 +2418,8 @@ static const command_t commands[] = {
     { "raminfo",  cmd_raminfo  },
     { "heapinfo", cmd_heapinfo },
     { "diskinfo", cmd_diskinfo },
+    { "nettest",  cmd_nettest  },
+    { "netinfo",  cmd_netinfo  },
     { "list",     cmd_list     },
     { "read",     cmd_read     },
     { "write",    cmd_write    },
@@ -2225,6 +2442,7 @@ static const command_t commands[] = {
     { "deluser",     cmd_deluser     },
     { "changerpass", cmd_changerpass },
     { "changempass", cmd_changempass },
+    { "install",     cmd_install     },
     { NULL,          NULL            }
 };
 
@@ -2388,4 +2606,31 @@ void shell_run(const user_t *user)
             kprintf("  (type 'help' for commands)\n");
         }
     }
+}
+
+/* ---- shell_exec_line ------------------------------------------------------ */
+
+void shell_exec_line(const user_t *user, const char *line_in)
+{
+    char  line[SHELL_BUF_SIZE];
+    char *argv[SHELL_MAX_ARGS];
+    int   i, n;
+
+    /* Copy into mutable buffer */
+    for (n = 0; line_in[n] && n < SHELL_BUF_SIZE - 1; n++)
+        line[n] = line_in[n];
+    line[n] = '\0';
+
+    g_session_user = user;
+
+    int argc = tokenize(line, argv, SHELL_MAX_ARGS);
+    if (argc == 0) return;
+
+    for (i = 0; commands[i].name != NULL; i++) {
+        if (sh_strcmp(argv[0], commands[i].name) == 0) {
+            commands[i].fn(argc, argv);
+            return;
+        }
+    }
+    kprintf("Unknown command: %s\n", argv[0]);;
 }

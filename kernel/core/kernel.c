@@ -17,17 +17,24 @@
 #include "paging.h"
 #include "kheap.h"
 #include "ata.h"
+#include "rtl8139.h"
+#include "net.h"
 #include "vfs.h"
 #include "pdfs.h"
 #include "fat32.h"
 #include "ext2.h"
 #include "ntfs.h"
 #include "process.h"
+#ifdef GDE_BUILD
+#include "gde.h"
+#include "de_loader.h"
+#include "boot_info.h"
+#endif
 
-/* Idle task: entered via normal context switch; halts until next IRQ */
+/* Idle task: yields CPU immediately so GDE runs without interruption */
 static void idle_task(void)
 {
-    for (;;) __asm__ volatile ("hlt");
+    for (;;) { proc_sleep(); __asm__ volatile ("hlt"); }
 }
 
 void kernel_main(void)
@@ -99,6 +106,12 @@ void kernel_main(void)
     kprintf("  (X) Identity-mapped 4 MB\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
+#ifdef GDE_BUILD
+    /* ---- GDE path: VBE mode was set by stage2 ---------------------------- */
+    if (g_boot_info->magic == BOOT_INFO_MAGIC && g_boot_info->vbe_ok) {
+        /* Finish remaining init (heap + ATA + filesystems) before GDE */
+#endif
+
     kprintf("  (0) Initialising kernel heap...");
     kheap_init();
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
@@ -120,6 +133,11 @@ void kernel_main(void)
             kprintf("  (!) No ATA drive detected\n");
         }
     }
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    kprintf("  (0) Probing network card...");
+    rtl8139_init();
+    net_init();
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
     kprintf("  (0) Mounting filesystems...");
@@ -226,11 +244,24 @@ void kernel_main(void)
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     kprintf("\n  Interrupts online.\n");
 
+#ifdef GDE_BUILD
+    }  /* end of "if VBE ok" block opened after paging_init() */
+    if (g_boot_info->magic == BOOT_INFO_MAGIC && g_boot_info->vbe_ok) {
+        /* Publish the kernel API table so external DEs can call kernel fns */
+        de_populate_api();
+        /* Try to load an external DE from /sys/de/<active>.bin on PDFS.
+         * If found it is jumped to and never returns.
+         * If absent or unreadable, fall through to the built-in GDE. */
+        de_load_and_run();
+        /* No external DE — spawn the built-in GDE as a kernel process */
+        proc_create("gde-session", gde_process_main);
+        /* Kernel main thread yields immediately so GDE gets the CPU */
+        for (;;) { proc_sleep(); __asm__ volatile ("hlt"); }
+    }
+    /* VBE failed — fall through to text-mode login */
+#endif
+
     /* ---- Login + shell loop ---------------------------------------------- */
-    /*
-     * Show the login screen on boot and after every logout.
-     * login_prompt() never returns NULL — it halts on too many failures.
-     */
     while (1) {
         const user_t *user = login_prompt();
         shell_run(user);

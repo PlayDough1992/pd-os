@@ -6,6 +6,8 @@
 #include "pic.h"
 #include "pit.h"
 #include "keyboard.h"
+#include "mouse.h"
+#include "rtl8139.h"
 #include "kernel.h"
 #include "io.h"
 
@@ -59,7 +61,12 @@ void interrupt_dispatch(interrupt_frame_t *frame)
         switch (irq) {
         /* IRQ_TIMER (0) is handled by irq0_preempt -> sched_irq directly */
         case IRQ_KEYBOARD: keyboard_handler(); break;
-        default: break;
+        case IRQ_MOUSE:    mouse_handler();    break;
+        default:
+            /* Dynamic check: network card IRQ (varies by PCI slot in QEMU) */
+            if (rtl8139_present() && irq == rtl8139_get_irq())
+                rtl8139_handler();
+            break;
         }
         pic_send_eoi(irq);
     }

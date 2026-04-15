@@ -23,6 +23,10 @@ uint32_t      users_hash(const char *s);
 const user_t *users_get(const char *username);
 int           users_verify(const char *username, const char *password);
 
+/* Enumerate users (for the GUI greeter). */
+int           users_count(void);                  /* number of active accounts */
+const user_t *users_get_by_index(int i);          /* NULL if out of range      */
+
 /*
  * Add a new user.  Returns 0 on success, -1 table full, -2 bad name, -3 exists.
  * is_admin != 0 → USER_FLAG_ROOT set.  Password is hashed immediately.

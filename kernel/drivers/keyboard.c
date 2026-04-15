@@ -158,3 +158,12 @@ char keyboard_getchar(void)
     kb_tail = (uint8_t)((kb_tail + 1) % KB_BUF_SIZE);
     return c;
 }
+
+/* Non-blocking: returns 0 if no key available */
+char keyboard_poll(void)
+{
+    if (kb_head == kb_tail) return 0;
+    char c = kb_buf[kb_tail];
+    kb_tail = (uint8_t)((kb_tail + 1) % KB_BUF_SIZE);
+    return c;
+}

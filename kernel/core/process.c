@@ -82,10 +82,13 @@ uint32_t sched_irq(uint32_t current_esp)
     g_procs[g_current].ticks_total++;
     g_procs[g_current].ticks_rem--;
 
-    if (g_procs[g_current].ticks_rem > 0)
+    /* Find next RUNNABLE task (skip SLEEPING and UNUSED/DEAD).
+     * Also switch immediately if current task used all its quantum. */
+    if (g_procs[g_current].ticks_rem > 0 &&
+        g_procs[g_current].state != PROC_SLEEPING)
         return current_esp;   /* stay in current task */
 
-    /* Round-robin: find next RUNNABLE (or RUNNING) task */
+    /* Round-robin: find next RUNNABLE task */
     next = (g_current + 1) % PROC_MAX;
     for (tries = 0; tries < PROC_MAX; tries++) {
         proc_state_t s = g_procs[next].state;
@@ -95,13 +98,16 @@ uint32_t sched_irq(uint32_t current_esp)
     }
 
     if (next == g_current) {
-        /* No other runnable task — reset quantum and stay */
+        /* No other runnable task — keep running (reset quantum) */
+        if (g_procs[g_current].state == PROC_SLEEPING)
+            g_procs[g_current].state = PROC_RUNNING;
         g_procs[g_current].ticks_rem = PROC_QUANTUM;
         return current_esp;
     }
 
     /* Switch */
-    g_procs[g_current].state  = PROC_RUNNABLE;
+    if (g_procs[g_current].state == PROC_RUNNING)
+        g_procs[g_current].state = PROC_RUNNABLE;
     g_procs[next].state       = PROC_RUNNING;
     g_procs[next].ticks_rem   = PROC_QUANTUM;
     g_current = next;
@@ -180,6 +186,37 @@ void proc_exit(void)
     g_procs[g_current].state = PROC_DEAD;
     __asm__ volatile ("sti");
     for (;;) __asm__ volatile ("hlt");
+}
+
+/* ---- proc_sleep / proc_wake ---------------------------------------------- */
+/*
+ * proc_sleep(): mark current process SLEEPING so the scheduler skips it
+ * immediately on the next tick instead of burning its full quantum.
+ * The caller should follow this with `hlt` to avoid a busy spin.
+ *
+ * proc_wake(pid): transition a SLEEPING process back to RUNNABLE.
+ * Safe to call from IRQ context (mouse_handler etc.).
+ */
+void proc_sleep(void)
+{
+    __asm__ volatile ("cli");
+    if (g_procs[g_current].state == PROC_RUNNING)
+        g_procs[g_current].state = PROC_SLEEPING;
+    __asm__ volatile ("sti");
+}
+
+void proc_wake(int pid)
+{
+    int i;
+    if (pid < 0 || pid >= PROC_MAX) return;
+    /* Find the slot with this pid */
+    for (i = 0; i < PROC_MAX; i++) {
+        if ((int)g_procs[i].pid == pid &&
+            g_procs[i].state == PROC_SLEEPING) {
+            g_procs[i].state = PROC_RUNNABLE;
+            break;
+        }
+    }
 }
 
 /* ---- queries ------------------------------------------------------------- */

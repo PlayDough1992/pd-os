@@ -11,13 +11,14 @@
 #include "kernel.h"
 
 #define PROC_MAX         16
-#define PROC_STACK_SIZE  8192    /* 8 KB kernel stack per process */
+#define PROC_STACK_SIZE  32768   /* 32 KB kernel stack per process */
 #define PROC_QUANTUM     10      /* timer ticks per time slice (~100 ms) */
 
 typedef enum {
     PROC_UNUSED   = 0,
     PROC_RUNNABLE,
     PROC_RUNNING,
+    PROC_SLEEPING,   /* voluntarily idle — skipped by scheduler */
     PROC_DEAD,
 } proc_state_t;
 
@@ -41,6 +42,14 @@ int       proc_create(const char *name, void (*entry)(void));
 
 /* Mark current process DEAD and spin (timer will switch away) */
 void      proc_exit(void);
+
+/* Voluntarily suspend current process until proc_wake(pid) is called.
+ * Returns immediately if the process is already not sleeping.
+ * Typically called from an idle loop; the scheduler skips SLEEPING tasks. */
+void      proc_sleep(void);
+
+/* Wake a sleeping process; safe to call from interrupt context */
+void      proc_wake(int pid);
 
 /* ---- Scheduler (called from irq0_preempt in sched_entry.asm) ---- */
 

@@ -17,3 +17,4 @@
 void keyboard_init(void);
 void keyboard_handler(void);
 char keyboard_getchar(void);
+char keyboard_poll(void);   /* non-blocking; returns 0 if no key waiting */

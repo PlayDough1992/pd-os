@@ -300,21 +300,174 @@ LBA 206+      File / subdir data  — contiguous, sector-aligned, monotonic allo
 
 ---
 
-## Future: GUI / VESA (Post-CLI)
+## Phase 13: Graphical Desktop Environment (GDE) — In Progress
 
-**Goal**: Graphical desktop environment
+The GUI is now functional. The following tracks current bugs and upcoming features.
 
-**High-level steps:**
-1. VESA/VBE graphics mode via INT 10h in Stage 2 (before protected mode)
-2. Linear framebuffer driver — plot pixels, draw rectangles, blit fonts
-3. PS/2 mouse driver (IRQ12)
-4. Window manager — window structs, z-order, drag/resize
-5. Event system — keyboard + mouse events dispatched to focused window
-6. GUI toolkit — button, label, text input, scrollview widgets
-7. Built-in apps: terminal emulator (run PD-Shell in a window), file manager, text editor
-8. Desktop environment shell — taskbar, clock, start menu
+### 13a: GDE Bug Fixes
 
-**Deferred until Phase 12 is complete.**
+- [ ] **Partial white on right side during drag** — drag content cache (`GFX_DRAGCACHE_PIXELS = 262144`) is capped at 256K pixels (1 MB / 4 bytes). Any window whose content area exceeds ~512×512 px gets truncated; the uncached right portion reads zero → appears white. Fix: increase `GFX_DRAGCACHE_PHYS` reservation or remove the pixel cap and use up to ~768 KB of the spare space at `0xB00000`.
+- [ ] **About window shows blank white** — `draw_content` for the About window is either null or not implemented. Needs to render OS name, version, build date, and hardware summary.
+
+### 13b: GDE Applications
+
+- [ ] **Text Editor (PD-Text)**
+  - Open, save, and create files via dialog
+  - Keyboard editing (insert/delete/arrow keys, Home/End, Page Up/Down)
+  - Entry in Start Menu under "Accessories"
+  - Desktop icon shortcut
+  - Saves to PDFS via `vfs_write`
+
+- [ ] **Terminal Emulator**
+  - Launches PD-Shell inside a GDE window
+  - Full VT100/ANSI-like line input with readline (backspace, arrows, history)
+  - Output scrollback buffer
+  - Entry in Start Menu under "System Tools"
+  - Currently the stub version behaves nothing like a real shell — requires a complete rewrite connecting to the kernel shell subsystem
+
+- [ ] **PD-Explorer** *(file manager)*
+  - Browse PDFS directory tree graphically (tree pane + file list pane)
+  - Copy, move, rename, delete files and folders
+  - **Permission enforcement** — calls `pdfs_stat_dir` / `vfs_open` under the current session's uid/gid; access denied to files/folders the logged-in user does not have read permission for (mode bits + uid/gid match, same rules as the shell `cat`/`ls` commands)
+  - Admin users (uid 0 / `USER_FLAG_ROOT`, or `g_elevated == 1`) bypass permission checks and can browse any path
+  - Non-admin users cannot navigate into or see the contents of directories owned by another user where the world-execute bit is not set (e.g. `/home/otheruser/`)
+  - Attempting to open/delete a file without permission shows an "Access denied" error dialog rather than silently failing
+  - Entry in Start Menu under "Accessories" and as a desktop icon
+
+- [ ] **PD-Browser** *(depends on Phase 14 network stack)*
+  - Rudimentary HTTP/1.1 GET client + basic HTML renderer (block-level tags, images deferred)
+  - Address bar, back/forward navigation, page source view
+  - Entry in Start Menu under "Internet"
+  - Depends on: TCP, DNS, HTTP layers from Phase 14
+
+### 13c: Drivers
+
+- [x] **Ethernet Driver** ✅ COMPLETE
+  - RTL8139C — PCI scan (vendor 0x10EC / device 0x8139), BAR0 I/O base, IRQ via PCI config
+  - 8 KB RX ring buffer at `0xC00000` (4 MB PSE page), 4 × 2 KB TX descriptor buffers
+  - IRQ dispatched dynamically in `exceptions.c` via `rtl8139_get_irq()`
+  - API: `rtl8139_send(buf, len)` / `rtl8139_recv(buf, &len)` / `rtl8139_present()` / `rtl8139_get_mac()`
+  - Boot line: `(X) RTL8139  I/O=0xC000  IRQ=11  MAC=52:54:00:xx:xx:xx`
+  - Shell command `nettest`: sends ARP broadcast to QEMU gateway, dumps raw reply — full TX+ISR+RX round-trip test
+  - Run with: `-device rtl8139,netdev=net0 -netdev user,id=net0` for live SLIRP replies
+
+- [ ] **Wifi Driver**
+  - Target: Autodetect wifi hardware, pretty much do what the ethernet driver does but for wifi.
+
+---
+
+## Phase 14: Network Stack + PDP Package Manager
+
+**Goal**: Full TCP/IP internet connectivity — required by PD-Browser and the PDP package manager.
+
+### 14a: Network Stack (`kernel/net/`)
+
+All layers sit on top of `rtl8139_send` / `rtl8139_recv` and are polled from a kernel net-tick (piggyback on PIT or a dedicated process).
+
+- [x] **ARP** (`net/arp.c`)
+  - ARP table (up to 16 entries), request + reply handling
+  - `arp_resolve(ip, mac_out)` — sends request, waits up to 500 ms for reply
+  - Auto-populated from incoming ARP replies
+
+- [x] **IP** (`net/ip.c`)
+  - IPv4 send/receive, checksum, fragmentation ignored (MTU ≤ 1500)
+  - Static IP config at boot: DHCP deferred; QEMU SLIRP default `10.0.2.15/24`, gateway `10.0.2.2`
+  - `ip_send(dst_ip, proto, payload, len)`
+  - `ip_recv()` — demux to UDP or TCP handler
+
+- [x] **UDP** (`net/udp.c`)
+  - Stateless send/receive
+  - `udp_send(dst_ip, dst_port, src_port, data, len)`
+  - `udp_recv(src_ip_out, src_port_out, buf, len_out)` — returns next queued datagram
+  - Required for DNS
+
+- [x] **DNS** (`net/dns.c`)
+  - Minimal resolver: single A-record query over UDP port 53
+  - Hardcoded resolver: `10.0.2.3` (QEMU SLIRP built-in DNS)
+  - `dns_resolve(hostname, ip_out)` — blocking with 2 s timeout, 2 retries
+  - Response cache: 8 entries (name → IPv4, TTL ignored)
+
+- [x] **TCP** (`net/tcp.c`)
+  - Single-connection state machine: CLOSED → SYN_SENT → ESTABLISHED → FIN_WAIT → CLOSED
+  - `tcp_connect(ip, port)` → returns connection handle
+  - `tcp_send(handle, data, len)`
+  - `tcp_recv(handle, buf, len_out)` — blocking with timeout
+  - `tcp_close(handle)`
+  - No simultaneous open; no listen/accept (client-only, sufficient for HTTP and PDP)
+  - Retransmit on timeout (simple fixed 1 s retry, up to 3 attempts)
+
+- [x] **HTTP** (`net/http.c`)
+  - HTTP/1.1 GET over TCP
+  - `http_get(host, path, buf, buf_size, out_len)` — resolves hostname via DNS, connects via TCP, sends request, reads response body
+  - Follows one redirect (301/302)
+  - Returns raw response body (HTML, JSON, binary)
+  - Used by both PD-Browser and PDP
+
+**Verification checklist:**
+1. `nettest` still passes after stack init
+2. `dns_resolve("example.com")` returns a valid IPv4
+3. `http_get("example.com", "/", ...)` returns HTML body
+4. New shell command `netinfo` prints: IP, gateway, MAC, DNS server
+
+---
+
+### 14b: PDP — PlayDough Package Manager
+
+**Command syntax** (mirrors apt):
+```
+admin pdp install <package>
+admin pdp remove  <package>
+admin pdp update            # refresh package index
+admin pdp list              # list available packages
+admin pdp info   <package>  # show package metadata
+```
+
+`pdp` is a shell built-in dispatched through the existing `admin` privilege gate — the user must authenticate as root before any install/remove operation runs.
+
+**Package repository:**
+- Hosted on GitHub repo: `PlayDough/pdp-pdos`
+- Index file: `https://raw.githubusercontent.com/PlayDough/pdp-pdos/main/INDEX`
+  - Format: one line per package — `name|version|description|release_asset_url`
+  - `release_asset_url` points to a GitHub Releases `.pdpkg` asset
+- Package format: `.pdpkg` — custom archive (32-byte header + file entries: path + size + raw bytes)
+- Packages are uploaded as GitHub Release assets; INDEX is a manually maintained text file in the repo root
+
+**Implementation plan:**
+- [x] `net/http.c` GET (Phase 14a) — fetches index and package archives
+- [ ] `kernel/core/pdp.c` — package manager logic
+  - `pdp_update()` — HTTP GET index → parse → write to `/var/pdp/index` on PDFS
+  - `pdp_install(name)` — look up URL in index, HTTP GET archive, extract to `/pdapps/user/<name>/`
+  - `pdp_remove(name)` — delete `/pdapps/user/<name>/` directory tree
+  - `pdp_list()` — read `/var/pdp/index`, print table
+  - `pdp_info(name)` — print single entry from index
+- [ ] Shell wiring: `admin pdp <subcommand> [args]` dispatches to `pdp.c`
+- [ ] PDFS scaffold creates `/var/pdp/` on first boot
+- [x] GitHub repo `PlayDough/pdp-pdos` — exists
+
+**Security considerations:**
+- Only `admin` (authenticated root) can install/remove — enforced by the existing `cmd_admin` gate
+- Package URLs must start with `https://github.com/PlayDough/pdp-pdos/releases/` — hardcoded prefix check prevents arbitrary URL injection
+- No package signing yet (deferred to future hardening phase)
+
+**Dependency order:**
+1. Phase 14a network stack (ARP → IP → UDP → DNS → TCP → HTTP)
+2. `pdp.c` core logic
+3. GitHub repo with at least one real package
+4. PD-Browser (can share the same `http_get` API)
+
+## Future: GUI / VESA (Post-CLI) ✅ SUPERSEDED BY PHASE 13
+
+~~**Goal**: Graphical desktop environment~~
+
+The GUI phase is now underway as Phase 13 above. Original high-level steps for reference:
+1. ~~VESA/VBE graphics mode via INT 10h in Stage 2~~ ✅ Done (mode scan + 1024×768×32bpp)
+2. ~~Linear framebuffer driver — plot pixels, draw rectangles, blit fonts~~ ✅ Done
+3. ~~PS/2 mouse driver (IRQ12)~~ ✅ Done (3-byte packets, zero-flicker cursor)
+4. ~~Window manager — window structs, z-order, drag/resize~~ ✅ Done
+5. ~~Event system — keyboard + mouse events dispatched to focused window~~ ✅ Done
+6. ~~GUI toolkit — button, label, text input, scrollview widgets~~ ✅ Done (basic)
+7. Built-in apps: terminal emulator, file manager, text editor — **Phase 13b**
+8. ~~Desktop environment shell — taskbar, clock, start menu~~ ✅ Done
 
 ---
 
@@ -330,7 +483,6 @@ LBA 206+      File / subdir data  — contiguous, sector-aligned, monotonic allo
 
 **Out of scope for now:**
 - 64-bit (planned for future separate version)
-- Network stack
 - USB support
 - SMP / multi-core
 - Audio

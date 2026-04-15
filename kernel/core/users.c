@@ -97,6 +97,21 @@ int users_verify(const char *username, const char *password)
     return users_hash(password) == u->password_hash;
 }
 
+int users_count(void)
+{
+    int i;
+    for (i = 0; i < MAX_USERS && user_table[i].username[0]; i++)
+        ;
+    return i;
+}
+
+const user_t *users_get_by_index(int i)
+{
+    if (i < 0 || i >= MAX_USERS || !user_table[i].username[0])
+        return (void *)0;
+    return &user_table[i];
+}
+
 /* ---- User management ----------------------------------------------------- */
 
 int users_add(const char *username, uint8_t is_admin, const char *password)

@@ -13,6 +13,14 @@ static uint8_t vga_col  = 0;
 static uint8_t vga_row  = 0;
 static uint8_t vga_attr = 0x07; /* white on black */
 
+/* Optional output hook — when set, vga_putchar forwards here instead */
+static void (*g_putchar_hook)(char) = (void*)0;
+
+void vga_set_hook(void (*fn)(char))
+{
+    g_putchar_hook = fn;
+}
+
 /* ---- Scrollback buffer ---------------------------------------------------- */
 #define SB_LINES 200
 static uint16_t g_screen[VGA_HEIGHT][VGA_WIDTH];  /* shadow of live display  */
@@ -147,6 +155,7 @@ static void scroll(void)
 void vga_putchar(char c)
 {
     uint16_t entry;
+    if (g_putchar_hook) { g_putchar_hook(c); return; }
     if (c == '\n') {
         vga_col = 0;
         if (++vga_row >= VGA_HEIGHT) scroll(); /* scroll() redraws + syncs */

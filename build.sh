@@ -81,7 +81,16 @@ build() {
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/arch/x86/exceptions.c"  -o "$BUILD_DIR/exceptions.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/pit.c"          -o "$BUILD_DIR/pit.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/keyboard.c"     -o "$BUILD_DIR/keyboard.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/mouse.c"         -o "$BUILD_DIR/mouse.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/ata.c"           -o "$BUILD_DIR/ata.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/rtl8139.c"       -o "$BUILD_DIR/rtl8139.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/net/net.c"               -o "$BUILD_DIR/net.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/net/arp.c"               -o "$BUILD_DIR/arp.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/net/ip.c"                -o "$BUILD_DIR/ip.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/net/udp.c"               -o "$BUILD_DIR/udp.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/net/dns.c"               -o "$BUILD_DIR/dns.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/net/tcp.c"               -o "$BUILD_DIR/tcp.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/net/http.c"              -o "$BUILD_DIR/http.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/users.c"           -o "$BUILD_DIR/users.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/login.c"           -o "$BUILD_DIR/login.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/mm/e820.c"              -o "$BUILD_DIR/e820.o"
@@ -94,6 +103,7 @@ build() {
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/ext2.c"              -o "$BUILD_DIR/ext2.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/ntfs.c"              -o "$BUILD_DIR/ntfs.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/shell.c"            -o "$BUILD_DIR/shell.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/install.c"          -o "$BUILD_DIR/install.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/process.c"          -o "$BUILD_DIR/process.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/kernel.c"           -o "$BUILD_DIR/kernel_main.o"
 
@@ -110,7 +120,16 @@ build() {
         "$BUILD_DIR/exceptions.o" \
         "$BUILD_DIR/pit.o" \
         "$BUILD_DIR/keyboard.o" \
+        "$BUILD_DIR/mouse.o" \
         "$BUILD_DIR/ata.o" \
+        "$BUILD_DIR/rtl8139.o" \
+        "$BUILD_DIR/net.o" \
+        "$BUILD_DIR/arp.o" \
+        "$BUILD_DIR/ip.o" \
+        "$BUILD_DIR/udp.o" \
+        "$BUILD_DIR/dns.o" \
+        "$BUILD_DIR/tcp.o" \
+        "$BUILD_DIR/http.o" \
         "$BUILD_DIR/users.o" \
         "$BUILD_DIR/login.o" \
         "$BUILD_DIR/e820.o" \
@@ -123,6 +142,7 @@ build() {
         "$BUILD_DIR/ext2.o" \
         "$BUILD_DIR/ntfs.o" \
         "$BUILD_DIR/shell.o" \
+        "$BUILD_DIR/install.o" \
         "$BUILD_DIR/process.o" \
         "$BUILD_DIR/kernel_main.o" \
         -o "$KERNEL_ELF"
@@ -137,7 +157,7 @@ build() {
     truncate -s $((DISK_SIZE * 512)) "$DISK_IMAGE"
     dd if="$BOOTLOADER_BIN"  of="$DISK_IMAGE" conv=notrunc bs=512 seek=0 count=1  2>/dev/null
     dd if="$STAGE2_BIN"      of="$DISK_IMAGE" conv=notrunc bs=512 seek=1          2>/dev/null
-    dd if="$KERNEL_BIN"      of="$DISK_IMAGE" conv=notrunc bs=512 seek=6          2>/dev/null
+    dd if="$KERNEL_BIN"      of="$DISK_IMAGE" conv=notrunc bs=512 seek=7          2>/dev/null
     echo -e "${GREEN}  [OK] Disk image: $DISK_IMAGE (64 MB)${NC}"
 
     # --- PDFS area at LBA 1024: leave blank so the kernel auto-formats to v3 ---
@@ -151,8 +171,8 @@ build() {
 
     # --- Stage 2 size check ---
     S2SIZE=$(wc -c < "$STAGE2_BIN")
-    if [ "$S2SIZE" -gt 2560 ]; then
-        echo -e "${RED}[FAIL] Stage 2 is $S2SIZE bytes — exceeds 5-sector limit (2560 bytes)${NC}"
+    if [ "$S2SIZE" -gt 3072 ]; then
+        echo -e "${RED}[FAIL] Stage 2 is $S2SIZE bytes — exceeds 6-sector limit (3072 bytes)${NC}"
         exit 1
     fi
     # --- FAT32 init at LBA 2048 ---
@@ -608,12 +628,12 @@ case "$TARGET" in
         build
         echo -e "${CYAN}Starting QEMU...${NC}"
         echo "Press Ctrl+Alt+G to release mouse, Ctrl+C to quit"
-        qemu-system-i386 -drive format=raw,file="$DISK_IMAGE" -m 128M
+        qemu-system-i386 -drive format=raw,file="$DISK_IMAGE" -m 128M -device rtl8139
         ;;
     run-debug)
         build
         echo -e "${CYAN}Starting QEMU (debug mode)...${NC}"
-        qemu-system-i386 -drive format=raw,file="$DISK_IMAGE" -m 128M \
+        qemu-system-i386 -drive format=raw,file="$DISK_IMAGE" -m 128M -device rtl8139 \
             -serial stdio -no-reboot -d cpu_reset
         ;;
     clean)
