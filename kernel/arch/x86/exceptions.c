@@ -6,6 +6,7 @@
 #include "pic.h"
 #include "pit.h"
 #include "keyboard.h"
+#include "mouse.h"
 #include "kernel.h"
 #include "io.h"
 
@@ -59,6 +60,7 @@ void interrupt_dispatch(interrupt_frame_t *frame)
         switch (irq) {
         /* IRQ_TIMER (0) is handled by irq0_preempt -> sched_irq directly */
         case IRQ_KEYBOARD: keyboard_handler(); break;
+        case 12:           mouse_handler();    break;   /* PS/2 mouse */
         default: break;
         }
         pic_send_eoi(irq);

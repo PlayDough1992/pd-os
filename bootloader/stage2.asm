@@ -32,6 +32,12 @@ E820_COUNT   equ 0x5000      ; dword: number of valid entries
 E820_ENTRIES equ 0x5004      ; 24-byte entries (base8 + len8 + type4 + acpi4)
 E820_MAX     equ 32
 
+; VBE framebuffer parameters — written by do_vbe, read by kernel from 0x5300
+; Layout: fb_addr(4) fb_width(2) fb_height(2) fb_pitch(2) fb_bpp(1) fb_ok(1)
+VBE_PARAMS    equ 0x5300     ; output struct (12 bytes)  — read by kernel
+VBE_CTRL_BUF  equ 0x6000     ; scratch: VBE controller info block (512 bytes)
+VBE_MODE_BUF  equ 0x6200     ; scratch: VBE mode info block (256 bytes)
+
 ; ---------------------------------------------------------------------------
 ;  Entry
 ; ---------------------------------------------------------------------------
@@ -56,6 +62,13 @@ stage2_start:
     int  0x10
 
     call draw_screen
+
+    ; Flush the BIOS keyboard buffer before entering the menu.
+    ; POST / stage1 / PS/2 BAT completion (0xAA) can leave stale bytes
+    ; in the buffer.  If any of those are consumed as a scan code by the
+    ; menu handler they can silently shift `selected` to 1, which causes
+    ; Enter to trigger the BIOS-reset path and the bootloader to loop.
+    call kbd_flush
 
     mov  byte [selected],  0
     mov  byte [countdown], MENU_TIMEOUT
@@ -169,8 +182,8 @@ stage2_start:
     ; Load kernel using INT 13h Extended Read (AH=42h, LBA mode)
     ; Split into two reads to avoid crossing the 64KB DMA boundary.
     ;   Read 1: 128 sectors from LBA 6   -> 0x1000:0x0000 (physical 0x10000)
-    ;   Read 2:  32 sectors from LBA 134 -> 0x2000:0x0000 (physical 0x20000)
-    ; Total: 160 sectors = 80 KB
+    ;   Read 2:  64 sectors from LBA 134 -> 0x2000:0x0000 (physical 0x20000)
+    ; Total: 192 sectors = 96 KB  (covers kernels up to ~95 KB)
     ; ------------------------------------------------------------------
     mov  si, msg_kernel_load
     call print_color_str
@@ -187,8 +200,8 @@ stage2_start:
     int  0x13
     jc   .kernel_err
 
-    ; --- Second read: 32 sectors (16 KB) into next 64KB page ---
-    mov  word  [dap_count],   32     ; 32 sectors = 16 KB
+    ; --- Second read: 64 sectors (32 KB) into next 64KB page ---
+    mov  word  [dap_count],   64     ; 64 sectors = 32 KB
     mov  word  [dap_offset],  0x0000 ; buffer: 0x2000:0x0000 = physical 0x20000
     mov  word  [dap_segment], 0x2000
     mov  dword [dap_lba_lo],  134    ; LBA 6 + 128
@@ -201,6 +214,15 @@ stage2_start:
 
     mov  si, msg_kernel_ok
     call print_color_str
+
+    ; -----------------------------------------------------------------
+    ; VBE graphics: handled by the kernel via Bochs VBE I/O ports.
+    ; (No BIOS INT 10h call here — avoids hangs on some firmware.)
+    ; Zero VBE_PARAMS so the kernel knows stage2 did not set a mode.
+    ; -----------------------------------------------------------------
+    xor  ax, ax
+    mov  es, ax
+    mov  byte [es:VBE_PARAMS+11], 0    ; fb_ok = 0
 
     ; -----------------------------------------------------------------
     ; Probe BIOS memory map (E820) before entering protected mode.
@@ -217,6 +239,11 @@ stage2_start:
     mov  si, msg_e820_warn
     call print_color_str
 .e820_cont:
+
+    ; Flush keyboard buffer before entering PM so the Enter keystroke
+    ; used to confirm the boot menu option is not picked up by the
+    ; kernel's PS/2 driver during its own init.
+    call kbd_flush
 
     lgdt [gdt_descriptor]
 
@@ -258,10 +285,10 @@ pm_entry:
     mov  ecx, 16384
     rep  movsd
 
-    ; Copy kernel chunk 2: 0x20000 -> 0x110000  (32 sectors = 16384 bytes = 4096 dwords)
+    ; Copy kernel chunk 2: 0x20000 -> 0x110000  (64 sectors = 32768 bytes = 8192 dwords)
     mov  esi, 0x20000
     mov  edi, 0x110000
-    mov  ecx, 4096
+    mov  ecx, 8192
     rep  movsd
 
     ; Jump to kernel entry point
@@ -896,3 +923,207 @@ msg_kernel_fail db ' [ERROR] Failed to load kernel from disk!', 0x0D, 0x0A, 0
 msg_bios        db 0x0D, 0x0A
                 db ' >> Resetting system to BIOS/firmware...', 0x0D, 0x0A
                 db ' >> Please press your BIOS key (Del / F2 / F12) when POST starts.', 0x0D, 0x0A, 0
+
+msg_vbe_ok      db ' >> VBE graphics mode set.', 0x0D, 0x0A, 0
+msg_vbe_fail    db ' >> [INFO] VBE not available; using text mode.', 0x0D, 0x0A, 0
+
+; VBE scanning state — written only by do_vbe, no kernel access needed
+vbe_score       db 0          ; best score found (higher = more preferred)
+vbe_mode        dw 0xFFFF     ; mode number of best candidate
+vbe_scan_count  dw 0          ; scan iteration safety counter
+vbe_seg         dw 0          ; mode list far-pointer segment
+vbe_off         dw 0          ; mode list far-pointer offset
+
+; ===========================================================================
+;  do_vbe  —  VESA VBE mode detection and activation
+;
+;  Scans the VBE mode list for the best match: prefers 800×600×32bpp, with
+;  graceful fallbacks down to 640×480×16bpp.  Sets the mode, then writes
+;  framebuffer parameters to VBE_PARAMS (0x5300).
+;
+;  Sets fb_ok=1 on success, fb_ok=0 on any failure.
+;  Clobbers nothing (full pushad / push es around entire routine).
+; ===========================================================================
+do_vbe:
+    pusha
+    push es
+
+    ; ---- Clear VBE_PARAMS: default fb_ok = 0 (failure) ----
+    xor  ax, ax
+    mov  es, ax
+    mov  byte [es:VBE_PARAMS+11], 0
+
+    ; ---- Get VBE controller info into VBE_CTRL_BUF ----
+    ; Write "VBE2" signature to request VBE 2.0+ info
+    mov  dword [es:VBE_CTRL_BUF+0], 0x32454256   ; "VBE2"
+    mov  ax, 0x4F00
+    mov  di, VBE_CTRL_BUF
+    int  0x10
+    cmp  ax, 0x004F               ; AL=0x4F → function supported + successful
+    jne  .done
+
+    ; Check "VESA" signature at offset 0 of controller info
+    cmp  dword [es:VBE_CTRL_BUF+0], 0x41534556   ; "VESA"
+    jne  .done
+
+    ; ---- Save mode list far pointer (offset at +14, segment at +16) ----
+    mov  ax, [es:VBE_CTRL_BUF+14]
+    mov  [vbe_off], ax
+    mov  ax, [es:VBE_CTRL_BUF+16]
+    mov  [vbe_seg], ax
+
+    ; ---- Initialise best-mode state + scan safety counter ----
+    mov  byte [vbe_score], 0
+    mov  word [vbe_mode],  0xFFFF
+    mov  word [vbe_scan_count], 512   ; never inspect more than 512 modes
+
+    ; ---- Scan every mode in the mode list ----
+.scan:
+    ; Safety counter: bail out if too many modes (broken mode list)
+    dec  word [vbe_scan_count]
+    jz   .pick_best
+
+    ; Read next mode number via far pointer
+    mov  ax, [vbe_seg]
+    mov  es, ax
+    mov  si, [vbe_off]
+    mov  cx, [es:si]               ; mode number (16-bit)
+    add  word [vbe_off], 2
+    cmp  cx, 0xFFFF                ; end-of-list sentinel
+    je   .pick_best
+
+    ; Get mode info for mode CX into VBE_MODE_BUF (ES=0)
+    push cx
+    xor  ax, ax
+    mov  es, ax
+    mov  di, VBE_MODE_BUF
+    mov  ax, 0x4F01
+    int  0x10
+    pop  cx
+    cmp  ax, 0x004F
+    jne  .scan
+
+    xor  ax, ax
+    mov  es, ax                    ; keep ES=0 for the rest of this iteration
+
+    ; ModeAttributes: must have bit 0 (supported) and bit 7 (LFB available)
+    mov  ax, [es:VBE_MODE_BUF+0]
+    test ax, 0x0001
+    jz   .scan
+    test ax, 0x0080
+    jz   .scan
+
+    ; MemoryModel (offset 27): 4=packed pixel, 6=direct color
+    movzx ax, byte [es:VBE_MODE_BUF+27]
+    cmp  ax, 4
+    je   .model_ok
+    cmp  ax, 6
+    jne  .scan
+.model_ok:
+    ; BitsPerPixel (offset 25): must be 16, 24, or 32
+    movzx ax, byte [es:VBE_MODE_BUF+25]
+    cmp  ax, 16
+    jl   .scan
+
+    ; Read resolution
+    mov  bx, [es:VBE_MODE_BUF+18]  ; XResolution
+    mov  dx, [es:VBE_MODE_BUF+20]  ; YResolution
+
+    ; Compute priority score (higher = more preferred)
+    ; 800×600 base=6, 1024×768 base=3, 640×480 base=0
+    ; bpp bonus: 32=+3, 24=+2, 16=+1
+    ; Scores:  800×600×32=9, 800×600×24=8, 800×600×16=7,
+    ;          1024×768×32=6, ... 640×480×16=1
+    xor  al, al
+    cmp  bx, 800
+    jne  .try1024
+    cmp  dx, 600
+    jne  .try1024
+    mov  al, 6
+    jmp  .add_bpp
+.try1024:
+    cmp  bx, 1024
+    jne  .try640
+    cmp  dx, 768
+    jne  .try640
+    mov  al, 3
+    jmp  .add_bpp
+.try640:
+    cmp  bx, 640
+    jne  .scan        ; not a preferred resolution — skip
+    cmp  dx, 480
+    jne  .scan        ; al stays 0
+.add_bpp:
+    movzx bx, byte [es:VBE_MODE_BUF+25]
+    cmp  bx, 32
+    je   .bpp32
+    cmp  bx, 24
+    je   .bpp24
+    inc  al           ; bpp=16 → +1
+    jmp  .compare
+.bpp24:
+    add  al, 2
+    jmp  .compare
+.bpp32:
+    add  al, 3
+.compare:
+    cmp  al, [vbe_score]
+    jle  .scan
+    mov  [vbe_score], al
+    mov  [vbe_mode],  cx
+    jmp  .scan
+
+    ; ---- Set the best mode found ----
+.pick_best:
+    cmp  word [vbe_mode], 0xFFFF
+    je   .done                     ; no suitable mode found
+
+    ; Get mode info one more time (to read PhysBasePtr etc.)
+    mov  cx, [vbe_mode]
+    xor  ax, ax
+    mov  es, ax
+    mov  di, VBE_MODE_BUF
+    mov  ax, 0x4F01
+    int  0x10
+    cmp  ax, 0x004F
+    jne  .done
+
+    ; Set the mode (bit 14 = use linear framebuffer, no CRTC)
+    mov  ax, 0x4F02
+    mov  bx, [vbe_mode]
+    or   bx, 0x4000
+    xor  di, di
+    int  0x10
+    cmp  ax, 0x004F
+    jne  .done
+
+    ; ---- Write framebuffer parameters to VBE_PARAMS (0x5300) ----
+    xor  ax, ax
+    mov  es, ax
+
+    ; PhysBasePtr at VBE_MODE_BUF+40 (uint32)
+    mov  eax, [es:VBE_MODE_BUF+40]
+    mov  [es:VBE_PARAMS+0], eax      ; fb_addr
+
+    ; XResolution at VBE_MODE_BUF+18 (uint16)
+    mov  ax, [es:VBE_MODE_BUF+18]
+    mov  [es:VBE_PARAMS+4], ax       ; fb_width
+
+    ; YResolution at VBE_MODE_BUF+20 (uint16)
+    mov  ax, [es:VBE_MODE_BUF+20]
+    mov  [es:VBE_PARAMS+6], ax       ; fb_height
+
+    ; BytesPerScanLine at VBE_MODE_BUF+16 (uint16)
+    mov  ax, [es:VBE_MODE_BUF+16]
+    mov  [es:VBE_PARAMS+8], ax       ; fb_pitch
+
+    ; BitsPerPixel at VBE_MODE_BUF+25 (uint8)
+    movzx ax, byte [es:VBE_MODE_BUF+25]
+    mov  [es:VBE_PARAMS+10], al      ; fb_bpp
+
+    mov  byte [es:VBE_PARAMS+11], 1  ; fb_ok = 1
+
+.done:
+    pop  es
+    popa
+    ret

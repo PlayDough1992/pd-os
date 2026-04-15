@@ -228,93 +228,481 @@ LBA 206+      File / subdir data  — contiguous, sector-aligned, monotonic allo
 
 ---
 
-## Phase 9b: Shell Quality of Life (Next)
+## Phase 9b: Shell Quality of Life ✅ COMPLETE
 
+**Completed**: April 12, 2026  
 **Goal**: Make the shell feel like a real terminal
 
-- **Command history** — circular buffer (e.g. 32 entries), ↑/↓ arrows to navigate. `readline` already has stub branches for `KEY_UP` / `KEY_DOWN`.
-- **Tab completion** — on `TAB` keypress, enumerate `g_cwd` via `pdfs_stat_dir`, find entries matching the current word prefix, complete if unique, list if ambiguous.
+### Command History
+- `g_hist[32][512]` — circular ring buffer; `hist_push()` / `hist_get()`
+- ↑/↓ arrows navigate history during readline; `hist_saved` slot preserves the partially-typed line when scrolling up and restores it on ↓ past the end
+- Duplicate suppression — identical consecutive entries silently dropped
+
+### Tab Completion
+- TAB fires `tab_complete()` on the current token
+- First token (no slash): prefix-searches `cmd_name_list[]`
+- Argument tokens or tokens containing `/`: resolve directory via `normalize_path`, enumerate entries via `pdfs_stat_dir`
+- Unique match → suffix inserted (directories gain a trailing `/`)
+- Multiple matches → columnar list printed below the prompt, readline redrawn
+
+### Live Suggestion Menu
+Fires on every printable keypress while editing the **first** token (command name):
+
+```
+pd@pd-shell:/> c_
+┌─────────────────┐
+│ clear           │  ← highlighted: black text on cyan background
+│ color           │  ← unselected: dark-grey text on black
+│ copy            │
+│ cat             │
+│ cd              │
+│ chmod           │
+│ chown           │
+│ cls             │
+└─────────────────┘
+```
+
+- `sug_update()` rebuilds the match list (up to 8 entries from `cmd_name_list[]`) on each keypress
+- `sug_draw_menu()` renders the menu directly below the input line; flips above the line when near the bottom of the 25-row screen
+- ↑/↓ arrows navigate the menu when it is active (bypasses history navigation)
+- **Space** confirms the highlighted entry: replaces typed prefix with full command name + a trailing space
+- Menu dismisses on: Enter, Escape, Backspace-to-empty, or any key that clears the first token
+
+### Readline Improvements
+- **Scroll anchor tracking** — `g_scroll_count` in VGA driver; per-keypress delta adjusts `anchor_row` when forced scrolls occur so the cursor position stays correct after the screen shifts
+- **Word-wrap** — `ww_draw()` helper performs soft look-ahead; whole words are moved to the next line instead of splitting mid-character at column 79
+- **`vga_clear_chars(col, row, n)`** — erases N characters from the VGA buffer without triggering a scroll; used by history navigation and backspace redraw
+- Input buffer `SHELL_BUF_SIZE` bumped 256 → 512 bytes
+
+### Verification
+1. ↑ recalls the previous command; ↓ returns to the partially-typed line
+2. TAB on `wri` completes to `write`; TAB on `sdi` completes to `sdir`
+3. TAB on an ambiguous prefix (e.g. `s`) prints a columnar match list
+4. Typing `c` immediately shows the suggestion menu listing `clear`, `color`, `copy`, `cat`, `cd`, `chmod`, `chown`, `cls`
+5. ↑/↓ in the menu selects entries; Space inserts the selected command name
+6. History persists for the full session; duplicates are suppressed
+
+---
+
+## Phase 10: Process Management ✅ COMPLETE
+
+**Completed**: April 13, 2026  
+**Goal**: Preemptive multitasking — PCB table, IRQ0 context switch, `ps`/`kill`
+
+**What shipped:**
+1. `g_procs[16]` PCB table, `g_current`, `g_next_pid` — `kernel/core/process.c`
+2. `proc_init()` — registers boot thread as pid 0 (`kernel/shell`, PROC_RUNNING)
+3. `proc_create(name, entry)` — kmalloc 8 KB stack, builds fake iret frame so the new task starts via `iret`
+4. `irq0_preempt` ISR stub (`kernel/arch/x86/sched_entry.asm`) — dedicated IRQ0 handler, not routed through `isr_common`
+5. `sched_irq(esp)` — ACKs PIC, calls `pit_handler`, saves ESP, round-robin on quantum expiry (10 ticks), returns new ESP
+6. `proc_kill(pid)` — marks DEAD; pid 0 protected
+7. Idle task (`static void idle_task`) — `hlt` loop, created as pid 1 before `sti`
+8. `ps` shell command — color-coded table (RUNNING=green, DEAD=dark-grey)
+9. `kill <pid>` shell command
+10. **Bug fix**: `proc_init`/`proc_create` moved before `sti` — fixes cold-boot triple-fault that caused Stage 2 menu to reappear on first Enter
+
+**Deferred to future phase:**
+- `fork()` / `exec()` — load flat binary from PDFS
+- User mode (ring 3) — TSS, `int 0x80` syscall gate
+- Page-level process isolation
 
 **Verification:**
-1. ↑ shows previous command; ↓ moves forward through history
-2. TAB completes `wri` → `write`, `sdi` → `sdir`
-3. TAB with ambiguous prefix lists matches
-4. History survives across commands in the same session
+1. `ps` shows pid 0 (shell, RUNNING) and pid 1 (idle, RUNNING)
+2. PIT preempts at 100 Hz — idle task switches in when shell is blocked on keyboard
+3. `kill 1` marks idle DEAD; `ps` shows it grey
+4. Boot goes directly to login on first Enter (triple-fault regression fixed)
 
 ---
 
-## Phase 10: Process Management
+## Phase 11: PDFS v3 + VFS Population + Desktop Environment Loader
 
-**Goal**: True multitasking — multiple processes, context switching, ring 3
-
-**Steps:**
-1. Process Control Block (PCB) — pid, state, registers, stack, page dir
-2. Assembly context switch — save/restore all GPRs + EFLAGS + ESP
-3. Round-robin scheduler — timer IRQ (PIT) triggers preemption
-4. `fork()` equivalent — clone current process (copy-on-write optional)
-5. `exec()` equivalent — load flat binary from PDFS into new process
-6. Process termination — reclaim pages, remove from scheduler queue
-7. `ps` shell command — list running processes
-8. `kill <pid>` shell command — terminate a process
-9. User mode (ring 3) separation — TSS, syscall gate or `int 0x80`
-
-**Verification:**
-1. Two processes run concurrently (e.g. two spinning counters)
-2. PIT preempts at 100 Hz
-3. Process creation and death clean up pages
-4. Ring 3 process cannot access kernel memory (GPF on attempt)
+**Goal**: Replace the fixed-layout PDFS v2 with a fully dynamic, journaled filesystem; populate the Debian-compatible + PD-OS-specific directory tree; and implement the `/de` desktop environment launcher.
 
 ---
 
-## Phase 11: PD-OS Virtual FS Population
+### Part A — PDFS v3 (Dynamic, Journaled, ext4-grade Metadata)
 
-**Goal**: Populate the PDFS directory structure defined above; link shell commands to paths
+#### Why v2 is insufficient
+- Root dir and every subdir are hard-limited to 32 entries (4 sectors, fixed)
+- Monotonic `next_free_lba` allocator never reclaims deleted space
+- Journal only protects one dir-sector write at a time (no multi-op atomicity)
+- Dirent carries no modification/access timestamps beyond `ctime`
+- No inode concept — metadata and data location are merged in the dirent
 
-**Steps:**
-1. On boot, if `/home` doesn't exist, auto-create `/home/<username>` for each user
-2. Create `/etc/pd-os/` with version file
-3. Create `/pdsys/` and `/pdapps/` skeleton directories
-4. Shell `sdir` and `ls` already work — `~` resolves to `/home/<username>`
-5. Move `g_passwd` user table to `/etc/passwd` (text format, parsed at boot)
-6. `useradd` / `userdel` shell commands — modify `/etc/passwd` on disk
+#### PDFS v3 Design
 
-**Verification:**
-1. Fresh boot has `/home/pd/`, `/home/root/`, `/etc/pd-os/version`, `/pdsys/`, `/pdapps/`
-2. `cat /etc/pd-os/version` prints PD-OS version string
-3. `/etc/passwd` parsed correctly; new users added with `useradd`
+**On-disk layout** (base LBA 200, same anchor):
+```
+LBA 200          Superblock v3 (1 sector)
+LBA 201          Journal — 8 sectors (4 KB ring log)
+LBA 209          Inode bitmap — 1 sector   (tracks 4096 inodes)
+LBA 210          Block bitmap — 4 sectors  (tracks 32768 × 512-byte blocks)
+LBA 214          Inode table  — 256 sectors (4096 inodes × 32 bytes each)
+LBA 470+         Data blocks  — rest of volume
+```
+
+**Inode (32 bytes)**:
+```
+flags       uint16  — IN_USE | IS_DIR | IS_SYMLINK
+uid/gid     uint8   — owner/group
+mode        uint16  — rwxrwxrwx (low 9 bits, Unix layout)
+link_count  uint16  — hard link count
+size        uint32  — file size in bytes (0 for dirs)
+ctime       uint32  — creation time (PIT ticks)
+mtime       uint32  — modification time
+atime       uint32  — access time
+blocks[4]   uint32  — direct block pointers (covers up to 2 KB per file for now)
+```
+*(Single indirect block pointer added in v3.1 when needed.)*
+
+**Directory block** (one 512-byte sector per dir block):
+- Each dir block holds up to **16 variable-length entries** (`name` up to 27 chars + 5-byte fixed header = 32 bytes minimum, padded to alignment)
+- Dirs start with 1 block; grow by appending an extra block when full (inode `blocks[]` extended)
+- No fixed cap per directory — limited only by available blocks
+
+**Block allocator**:
+- Bitmap-based free list (block bitmap at LBA 210)
+- `alloc_block()` / `free_block()` — O(n) bitmap scan; blocks are reused after `free_block`
+- Replaces the monotonic `next_free_lba` pointer (end of v2 wasted space on delete)
+
+**Journal (8 sectors, ring log)**:
+- Write-ahead log for all metadata mutations (inode writes, dir block writes, bitmap updates)
+- Log entry header: `{ type, target_lba, len, checksum }`  
+- Types: `JE_INODE`, `JE_DIRBLK`, `JE_BITMAP`, `JE_COMMIT`  
+- A transaction: write log entries → write `JE_COMMIT` → apply to disk → clear log head  
+- On mount: scan log; if uncommitted entries exist, discard them (redo not needed — write-intent log); if `JE_COMMIT` present, replay the transaction to disk
+
+**Permissions** (same as v2, kept identical to ext4 semantics):
+- `pdfs_set_context(caller, elevated)` before every mutating op
+- Check: `caller.uid == inode.uid` OR `USER_FLAG_ROOT` OR `g_elevated` OR `(mode & WOTH)`
+- Sticky bit (mode bit 9) on directories: only owner can unlink entries
+
+**Version migration**:
+- On mount: if superblock magic matches but version == 2 → mount read-only, print warning `"PDFS v2 disk — run mkpdfs to upgrade"`
+- `mkpdfs` shell command reformats to v3 (destructive, requires `elev`)
+
+#### Steps — Part A
+1. Define new `pdfs_superblock_v3_t`, `pdfs_inode_t`, `pdfs_direntry_t` in `kernel/include/pdfs.h` — keep v2 structs for migration detection
+2. Implement block bitmap allocator (`alloc_block` / `free_block`) in `kernel/fs/pdfs.c`
+3. Implement inode bitmap allocator (`alloc_inode` / `free_inode`)
+4. Implement journal: `jrnl_begin()`, `jrnl_log(type, lba, data)`, `jrnl_commit()`, `jrnl_replay()` (called from `pdfs_mount`)
+5. Rewrite `pdfs_mkdir`, `pdfs_create`, `pdfs_unlink` to use inode + block allocators + journal
+6. Rewrite `pdfs_read`, `pdfs_write` to use inode block pointers instead of `start_lba`
+7. Rewrite `pdfs_stat_dir` to enumerate variable-length dir entries via inode → block pointers
+8. Update `pdfs_format` to write v3 superblock, clear bitmaps, initialise inode table, create root dir inode (inode 2, matching ext2/ext4 convention)
+9. Update `mkpdfs` shell command; update `diskinfo` to show v3 stats (free blocks, inode usage)
+10. Update `build.sh` PDFS init Python script to write a v3 superblock + bitmaps
 
 ---
 
-## Phase 12: Integration & Polish
+### Part B — VFS Population (Debian hierarchy + PD-OS extensions)
 
-**Goal**: Make PD-OS feel solid and well-documented for contributors
+Populated automatically on first boot if the directory does not exist:
 
-**Steps:**
-1. Boot time optimization (avoid redundant ATA reads on mount)
-2. Consistent error messages across all shell commands
-3. `man <command>` or `help <command>` — per-command usage detail
-4. Boot splash / version banner improvements
-5. Kernel build size optimization
-6. Stress testing — create/delete 32 files, fill disk, reboot cycles
-7. Full documentation pass: README, PROJECT_STATUS, architecture notes
+```
+/                   (PDFS root, inode 2)
+├── bin/            uid=0 gid=0 mode=755
+├── sbin/           uid=0 gid=0 mode=755
+├── lib/            uid=0 gid=0 mode=755
+├── lib32/          uid=0 gid=0 mode=755
+├── etc/            uid=0 gid=0 mode=755
+│   └── pd-os/      uid=0 gid=0 mode=755
+│       └── version (file: "PD-OS 0.1.0\n")
+├── home/           uid=0 gid=0 mode=755
+│   ├── root/       uid=0 gid=0 mode=700
+│   └── pd/         uid=1 gid=1 mode=755
+├── root/           uid=0 gid=0 mode=700
+├── dev/            uid=0 gid=0 mode=755
+├── proc/           uid=0 gid=0 mode=755
+├── sys/            uid=0 gid=0 mode=755
+├── tmp/            uid=0 gid=0 mode=1777  (sticky)
+├── var/            uid=0 gid=0 mode=755
+│   ├── log/        uid=0 gid=0 mode=755
+│   └── tmp/        uid=0 gid=0 mode=1777  (sticky)
+├── usr/            uid=0 gid=0 mode=755
+│   ├── bin/        uid=0 gid=0 mode=755
+│   ├── sbin/       uid=0 gid=0 mode=755
+│   ├── lib/        uid=0 gid=0 mode=755
+│   └── share/      uid=0 gid=0 mode=755
+├── mnt/            uid=0 gid=0 mode=755
+│   ├── fat/        (VFS FAT32 mount point)
+│   ├── ext2/       (VFS ext2 mount point)
+│   └── ntfs/       (VFS NTFS mount point)
+├── pdsys/          uid=0 gid=0 mode=755
+│   ├── kernel/     uid=0 gid=0 mode=755
+│   ├── drivers/    uid=0 gid=0 mode=755
+│   └── version     (file: "PD-OS 0.1.0\n")
+├── pdapps/         uid=0 gid=0 mode=755
+│   ├── system/     uid=0 gid=0 mode=755
+│   └── user/       uid=0 gid=1 mode=775
+└── de/             uid=0 gid=0 mode=755   ← PD-OS specific (see Part C)
+```
+
+**`/etc/passwd`** — plain text, one line per user:
+```
+root:x:0:0:root:/root:/bin/shell
+pd:x:1:1:pd:/home/pd:/bin/shell
+```
+- Parsed at boot into the existing `g_users[]` table; replaces the hard-coded array
+- `useradd <name> <password>` — appends entry, creates `/home/<name>/` with correct uid
+- `userdel <name>` — removes entry (does not delete home dir — use `rm` separately)
+- `whoami` and `id` read from parsed table
+
+#### Steps — Part B
+1. `fs_populate()` — called from `kernel_main` after `pdfs_mount`; checks existence via `vfs_open` before creating anything (idempotent — safe on every boot)
+2. Create all directories above with correct uid/gid/mode using `pdfs_mkdir`
+3. Write `/etc/pd-os/version` and `/pdsys/version` text files
+4. Write initial `/etc/passwd` file if not present
+5. `passwd_load()` — parse `/etc/passwd` at boot into `g_users[]`
+6. `passwd_save()` — write `g_users[]` back to `/etc/passwd`
+7. `useradd` / `userdel` shell commands
 
 ---
 
-## Future: GUI / VESA (Post-CLI)
+### Part C — `/de` Desktop Environment Loader
 
-**Goal**: Graphical desktop environment
+#### Directory convention
+Each installed DE is a subdirectory of `/de/`. **Desktop environments are entirely optional** — if `/de/` is empty or absent, PD-OS boots straight to PD-Shell with no prompts. DEs are fully open: anyone can create their own by placing a `launch` binary inside a new `/de/<name>/` directory, with no installer, registry, or system modification required. The DE scanner discovers them automatically at login time.
 
-**High-level steps:**
-1. VESA/VBE graphics mode via INT 10h in Stage 2 (before protected mode)
-2. Linear framebuffer driver — plot pixels, draw rectangles, blit fonts
-3. PS/2 mouse driver (IRQ12)
-4. Window manager — window structs, z-order, drag/resize
-5. Event system — keyboard + mouse events dispatched to focused window
-6. GUI toolkit — button, label, text input, scrollview widgets
-7. Built-in apps: terminal emulator (run PD-Shell in a window), file manager, text editor
-8. Desktop environment shell — taskbar, clock, start menu
+```
+/de/
+├── default         (text file: name of default DE, e.g. "pdwm\n") — optional
+├── pdwm/           first-party PD-OS window manager (future)
+│   └── launch      executable binary (flat ELF, loaded by kernel loader — Phase 12+)
+└── <user-created>/ ← any user can drop a DE here; auto-discovered on next login
+    └── launch
+```
 
-**Deferred until Phase 12 is complete.**
+#### Boot-time DE selection logic (runs after login, before dropping to shell)
+```
+1. Scan /de/ for subdirs that contain a "launch" file → build DE list
+2. If DE list is empty  → skip, drop straight to PD-Shell
+3. If DE list has exactly 1 entry → auto-launch it (no prompt)
+4. If /de/default exists and its content matches a valid DE name → auto-launch it
+5. Otherwise (multiple DEs, no valid default) → show prompt:
+
+   ┌──────────────────────────────────────────────────────────────────────────┐
+   │  Desktop environments available:                                         │
+   │    [1] pdwm                                                              │
+   │    [2] <other>                                                           │
+   │    [S] Skip — continue to PD-Shell                                      │
+   │                                                                          │
+   │  Select [1/2.../S]:                                                      │
+   └──────────────────────────────────────────────────────────────────────────┘
+
+   - Timeout 10 seconds → falls through to PD-Shell
+   - User types number → launch that DE
+   - User types S / Enter on empty / timeout → drop to PD-Shell
+```
+
+#### DE launcher (`de_launch`)
+- Reads `/de/<name>/launch` binary into memory
+- Hands off to process manager: `proc_create_from_binary(name, ptr, size)` (Phase 12 kernel loader)
+- Shell process blocks (waits for DE proc to exit) then returns to login screen on DE exit
+- For Phase 11: `de_launch` is stubbed — prints `"Launching <name>... (DE runtime not yet implemented)"` and returns to shell. The selection logic and `/de/` directory structure are fully implemented and tested.
+
+#### Steps — Part C
+1. `de_scan(names[], max)` — enumerates `/de/` subdirs that have a `launch` child; returns count
+2. `de_read_default(out)` — reads `/de/default` into `out`; returns 0 if file exists and is valid
+3. `de_select_and_launch()` — implements the selection logic above; called from login flow in `kernel.c` after successful authentication
+4. Stub `de_launch(name)` — prints banner, returns 0
+5. Update `kernel_main` login flow: after `login_run()` succeeds, call `de_select_and_launch()` before entering shell loop
+
+---
+
+### Verification
+1. Fresh `mkpdfs` formats v3; `diskinfo` shows inode table, free block count
+2. Create 100 files in one directory — succeeds (no 32-entry cap)
+3. Delete 50 files — `diskinfo` shows blocks freed (allocator reclaimed them)
+4. Simulate power-off mid-write by aborting QEMU mid-journal-transaction; remount → journal replay restores consistency
+5. All Debian-hierarchy dirs present after first boot: `ls /home/pd`, `cat /etc/pd-os/version`, `cat /etc/passwd`
+6. `useradd testuser password` → entry in `/etc/passwd`, `/home/testuser/` created
+7. `/de/` empty → boot drops straight to PD-Shell
+8. Create `/de/pdwm/launch` → next boot auto-launches (stub prints banner, returns to shell)
+9. Create two DE dirs with no `/de/default` → selection prompt appears with 10-second timeout
+
+---
+
+## Phase 12: Physical Hardware Readiness + pdwm Desktop Environment
+
+**Goal**: Produce a production-quality 32-bit OS capable of booting on real legacy hardware.  Deliver **pdwm**, the default PD-OS window manager — a Windows ME-inspired GUI with modern rounded-corner windows, a green persistent taskbar, and an integrated terminal emulator.
+
+---
+
+### Physical Hardware Readiness Checklist
+
+| Area | Status | Notes |
+|---|---|---|
+| A20 gate (3 methods) | ✅ done | BIOS 2401h / KBC / Fast A20 |
+| INT 13h LBA disk read | ✅ done | 160-sector split read |
+| E820 memory map | ✅ done | ACPI 3.0, 32-entry cap |
+| Real-mode VBE probe + set | 🔄 Phase 12a | Before protected mode switch |
+| PS/2 keyboard (IRQ1) | ✅ done | scancode set 1, circular buffer |
+| PS/2 mouse (IRQ12) | 🔄 Phase 12a | 3-byte packet stream |
+| RTC real-time clock | 🔄 Phase 12a | CMOS ports 0x70/0x71 |
+| ACPI shutdown / reboot | Deferred | Add `shutdown` shell command post-12 |
+| Serial debug port (COM1) | Deferred | Optional logging on real HW |
+| Physical USB boot image | 🔄 Phase 12a | Raw disk image → Rufus DD mode |
+
+---
+
+### Part A — VESA VBE Graphics Foundation
+
+#### Stage 2 additions (real-mode, before protected mode)
+1. Probe VBE controller info (`INT 10h AX=4F00h`) — verify "VESA" signature
+2. Scan mode list: prefer **800×600×32bpp**, then ×24, ×16; 1024×768 fallback; 640×480 last resort
+3. For each candidate: get mode info (`INT 10h AX=4F01h`), require LFB attribute (bit 7) + packed/direct color memory model
+4. Set best mode (`INT 10h AX=4F02h`, bit 14 = linear framebuffer)
+5. Write `boot_params_t` struct to physical address **0x5300** (safe above E820 block):
+   - `fb_addr` (uint32) — physical linear framebuffer address (from VBE `PhysBasePtr`)
+   - `fb_width`, `fb_height`, `fb_pitch` (uint16) — resolution and bytes/line
+   - `fb_bpp` (uint8) — bits per pixel
+   - `fb_ok` (uint8) — 1 = VBE active, 0 = fallback text mode
+6. If VBE probe fails: `fb_ok=0`, kernel falls back to VGA text mode gracefully
+
+#### Kernel page-table extension (PSE)
+- Enable CR4.PSE (4 MB pages) during `paging_init()`
+- Add `paging_map_frame(uint32_t phys)` — inserts a PSE 4 MB PDE to identity-map the chunk containing `phys`
+- Called immediately after `paging_init()`, if `boot_params->fb_ok`, to map the framebuffer before any pixel write
+
+#### GFX driver (`kernel/drivers/gfx.c`)
+- `gfx_init(boot_params_t *)` — stores globals, calls `paging_map_frame`, sets output routing
+- Primitives: `gfx_pixel`, `gfx_fill_rect`, `gfx_draw_rect`, `gfx_hline`, `gfx_vline`
+- Font: embedded 8×8 VGA ROM bitmap font (ASCII 32–127, 768 bytes)
+- `gfx_char(x, y, c, fg, bg)`, `gfx_text(x, y, str, fg, bg)`, `gfx_putchar(c)` (CRT-style cursor)
+- `gfx_rounded_rect(x,y,w,h,r,color)` — filled with pixel-masked corners (4px radius)
+- `kprint_redirect(gfx_putchar)` — all `kprintf` output routes to the framebuffer after `gfx_init()`
+
+#### PS/2 Mouse driver (`kernel/drivers/mouse.c`)
+- Enable aux port (KBC command 0xA8), set remote/stream mode, request data reports
+- IRQ12: read 3-byte packet (buttons, dx, dy sign-extended), accumulate absolute position
+- `mouse_get_event(mouse_event_t *)` — non-blocking dequeue
+
+#### RTC driver (`kernel/drivers/rtc.c`)
+- Read BCD hours/minutes/seconds from CMOS (port 0x70/0x71 registers 0x00, 0x02, 0x04)
+- `rtc_read(uint8_t *h, uint8_t *m, uint8_t *s)` — converts BCD → binary
+
+---
+
+### Part B — pdwm Window Manager
+
+#### Visual design — Windows ME heritage, modern edge
+```
+┌──────────────────────────────────────────────────────────┐
+│  Desktop: teal  #008080                                  │
+│                                                          │
+│  ╭─────────────────────────────────── _ □ ╳  ╮           │
+│  │ Window title bar (blue gradient)          │           │
+│  │                  white client area        │           │
+│  │   rounded 4px corners                     │           │
+│  ╰───────────────────────────────────────────╯           │
+│                                                          │
+╰──────────────────────────────────────────────────────────╯
+│ ⊞ Start  │  [Terminal]  │             │  12:34  │
+└──────────────────────────────────────────────────────────┘
+             taskbar: silver  #D4D0C8   H=28px
+```
+
+**Color palette:**
+| Element | RGB | Notes |
+|---|---|---|
+| Desktop | 0, 128, 128 | Classic teal |
+| Taskbar | 212, 208, 200 | Win ME silver |
+| Title bar (active) | 0..16, 0..80, 168..208 | Blue gradient (3 bands) |
+| Title bar (inactive) | 128, 128, 128 | Gray |
+| Window border | 212, 208, 200 | Same as taskbar |
+| Client area | 255, 255, 255 | White |
+| Start button | 92, 175, 57 | Modern green |
+| Close button | 200, 48, 48 | Red on hover |
+
+#### Window manager core
+- `wm_window_t`: x, y, w, h, title, focused, minimized, z_order, content-draw callback
+- Max 8 simultaneous windows
+- `wm_create(x,y,w,h,title,cb)` / `wm_close(id)` / `wm_focus(id)`
+- `wm_hit_test(mx, my)` — find topmost window at mouse coords
+- `wm_drag_begin(id, mx, my)` / `wm_drag_update(mx, my)` / `wm_drag_end()` — window drag
+- `wm_redraw_all()` — redraw desktop → windows bottom-to-top → taskbar
+- `wm_draw_window(id)` — title bar (gradient + rounded corners), border, client area call
+- Caption buttons drawn as 14×12 rounded rectangles: `_` (minimize), `□` (maximize, disabled initially), `×` (close, red bg)
+
+#### pdwm Event loop (`kernel/de/pdwm/pdwm.c`)
+```
+pdwm_main()
+├── gfx_init(boot_params)
+├── mouse_enable()
+├── rtc_init()
+├── wm_create terminal window (80×25 chars, titled "Terminal")
+├── Start event loop:
+│     poll keyboard_getchar() → route to focused window on_key()
+│     poll mouse_get_event() → hit-test → drag or button handling
+│     every ~18 ticks → redraw clock in taskbar
+│     every frame → wm_redraw_all() if dirty flag set
+└── Never returns (DE is the process for this session)
+```
+
+#### Terminal window
+- 80-column × 24-row visible area (8×8 font → 640×192 pixels of content)
+- Separate scroll-back buffer (200 lines)
+- On each `kprintf` character: appended to terminal line buffer, dirty flag set
+- On Enter: parse & run shell command (calls existing `shell_dispatch(cmd)`)
+- Scrollbar on right side; PgUp/PgDn scroll the view
+- Tab-completion and history work identically to CLI shell
+
+#### Start menu (Phase 12b, stub in Phase 12a)
+- Start button opens a 160×120 popover above taskbar
+- Entries: Applications, Settings (stub), Shutdown, Restart
+- Shutdown: halts CPU with CLI/HLT; Restart: pulses KBC 0xFE (same as stage2 reset)
+
+---
+
+### Part C — Physical Hardware Testing Matrix
+
+| Hardware type | Boot method | Status |
+|---|---|---|
+| Any BIOS PC (2000–2010) | Rufus DD-mode USB | Target |
+| QEMU `-accel whpx` | Existing build.ps1 | Verified |
+| QEMU `-accel tcg` | WSL build.sh run | CI |
+| CD-ROM boot | El Torito ISO (Phase 12b) | Deferred |
+
+**Creating a bootable USB (Windows):**
+```
+# Write image to USB in Rufus: DD mode (not ISO mode)
+# Or from Linux/WSL:
+dd if=build/pd-os.img of=/dev/sdX bs=512 status=progress
+```
+
+**Kernel size budget**: current 74 KB → Phase 12 target ≤ 160 KB (fits in 160-sector read)
+
+---
+
+### Steps — Phase 12
+1. Stage 2: VBE probe + mode set + write to 0x5300
+2. `kernel/include/boot_params.h` — struct definition
+3. `kernel/mm/paging.c/h` — PSE enable + `paging_map_frame()`
+4. `kernel/core/io.c/h` — `kprint_redirect()` function pointer
+5. `kernel/drivers/gfx.c/h` — framebuffer driver + 8×8 font + `gfx_putchar`
+6. `kernel/drivers/mouse.c/h` — PS/2 mouse IRQ12
+7. `kernel/drivers/rtc.c/h` — CMOS RTC
+8. `kernel/de/pdwm/pdwm.c/h` — window manager + pdwm DE
+9. Wire into `kernel.c` (paging_map_frame → gfx_init → kprint_redirect → mouse_init → rtc_init)
+10. Wire IRQ12 in `exceptions.c` → `mouse_handler()`
+11. `de_launch()` in `fs_init.c` calls `pdwm_main(user)` instead of printing stub
+12. `build.sh` — compile + link all new files
+13. Test on QEMU; test on physical hardware (USB boot)
+
+---
+
+### Verification
+1. `build.sh all` succeeds, kernel ≤ 160 KB
+2. QEMU: boot → VBE mode set → teal desktop + taskbar visible within 3 seconds of kernel entry
+3. Mouse cursor moves smoothly around screen
+4. Clock in taskbar updates every second (RTC)
+5. Terminal window accepts input, runs shell commands, displays output in window
+6. Multiple windows can be created (e.g., `open terminal` command opens second terminal)
+7. Window drag works with mouse
+8. Close button × removes window
+9. Physical USB boot: reaches desktop on at least one tested legacy PC
+10. `/de/pdwm/launch` file present → `de_select_and_launch` auto-launches pdwm normally
 
 ---
 

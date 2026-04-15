@@ -23,6 +23,12 @@
 #include "ext2.h"
 #include "ntfs.h"
 #include "process.h"
+#include "fs_init.h"
+#include "boot_params.h"
+#include "gfx.h"
+#include "mouse.h"
+#include "rtc.h"
+#include "../de/pdwm/pdwm.h"
 
 /* Idle task: entered via normal context switch; halts until next IRQ */
 static void idle_task(void)
@@ -32,13 +38,17 @@ static void idle_task(void)
 
 void kernel_main(void)
 {
+    /* 1. Paging must be first — identity-maps first 4 MB */
+    paging_init();
+
+    /* 2. VGA text mode: needed for all output until gfx_init switches us */
     vga_init();
 
-    /* ---- Banner ---------------------------------------------------------- */
+    /* ---- Banner (text mode) ------------------------------------------ */
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     kprintf("===============================================================================\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("               PD-Kernel  v0.1  -  Phase 10: Process Management\n");
+    kprintf("               PD-Kernel  v0.1  -  Phase 12: pdwm Desktop\n");
     vga_set_color(VGA_COLOR_LIGHT_CYAN, VGA_COLOR_BLACK);
     kprintf("===============================================================================\n");
 
@@ -60,6 +70,19 @@ void kernel_main(void)
     pic_mask_irq(12); pic_mask_irq(13); pic_mask_irq(14); pic_mask_irq(15);
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     kprintf("  (X) COMPLETE\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    /* 3. Graphics: Bochs VBE I/O (safe now that IDT+PIC are up) */
+    kprintf("  (0) Initialising graphics...");
+    gfx_init();
+    if (gfx_is_active()) {
+        kprint_redirect(gfx_putchar);
+        kprintf("\nPD-Kernel  v0.1  -  Phase 12: pdwm Desktop\n");
+        kprintf("VBE %dx%d 32bpp  |  Bochs LFB active\n\n");
+    } else {
+        vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+        kprintf("  (!) Bochs VBE not found; text mode\n");
+    }
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
     kprintf("  (0) Waking up PIT @ 100 Hz...");
@@ -93,18 +116,13 @@ void kernel_main(void)
             (pmm_free_frames() * PMM_PAGE_SIZE) / (1024u * 1024u));
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
-    kprintf("  (0) Enabling paging...");
-    paging_init();
-    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-    kprintf("  (X) Identity-mapped 4 MB\n");
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-
     kprintf("  (0) Initialising kernel heap...");
     kheap_init();
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
     kprintf("  (X) %u KB heap ready\n",
             kheap_free_bytes() / 1024u);
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
 
     kprintf("  (0) Probing ATA drives...");
     ata_init();
@@ -166,16 +184,23 @@ void kernel_main(void)
             vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
             kprintf("  (!) NTFS not found at LBA 69632\n");
         }
+        if (pdfs_ok == 0) {
+            kprintf("  (0) Populating filesystem...");
+            fs_populate();
+            vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+            kprintf("  (X) VFS tree ready\n");
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        }
     }
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
-    /* ---- Enable interrupts ----------------------------------------------- */
-    __asm__ volatile ("sti");
+    kprintf("  (0) Initialising PS/2 mouse...");
+    mouse_init();
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-    kprintf("\n  Interrupts online.\n");
-
-    /* ---- Process manager ------------------------------------------------- */
+    kprintf("  (X) Mouse IRQ12 active\n");
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    /* ---- Process manager (must be before sti) ---------------------------- */
     kprintf("  (0) Initialising process manager...");
     proc_init();
     proc_create("idle", idle_task);
@@ -183,13 +208,22 @@ void kernel_main(void)
     kprintf("  (X) Scheduler ready  (%d tasks)\n", proc_count_active());
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
+    /* ---- Enable interrupts ----------------------------------------------- */
+    __asm__ volatile ("sti");
+    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+    kprintf("\n  Interrupts online.\n");
+    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
     /* ---- Login + shell loop ---------------------------------------------- */
-    /*
-     * Show the login screen on boot and after every logout.
-     * login_prompt() never returns NULL — it halts on too many failures.
-     */
     while (1) {
-        const user_t *user = login_prompt();
-        shell_run(user);
+        if (gfx_is_active()) {
+            /* Graphical session: pdwm handles its own login dialog */
+            pdwm_main(NULL);
+        } else {
+            /* Text-mode fallback */
+            const user_t *user = login_prompt();
+            de_select_and_launch(user);
+            shell_run(user);
+        }
     }
 }

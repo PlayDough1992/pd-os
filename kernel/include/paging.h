@@ -26,15 +26,28 @@
 #define PAGE_PRESENT   (1u << 0)        /* P  — entry is valid               */
 #define PAGE_WRITABLE  (1u << 1)        /* R/W — read+write                  */
 #define PAGE_USER      (1u << 2)        /* U/S — user-mode accessible        */
+#define PAGE_PSE       (1u << 7)        /* PS  — 4 MB page (requires CR4.PSE)*/
 
 /*
  * Initialise paging.
  *
- * Zeroes the page directory, identity-maps the first 4 MB using Page Table 0,
- * loads CR3, and sets CR0.PG.  After this call the CPU is running with paging
- * enabled; because the mapping is identity (virt == phys), execution
- * continues seamlessly.
+ * Enables CR4.PSE (4 MB page extension), zeroes the page directory,
+ * identity-maps the first 4 MB using a 4 KB page table (PDE[0]),
+ * loads CR3, and sets CR0.PG.
  *
- * Must be called AFTER pmm_init() (so the PMM knows which frames are used).
+ * Must be called AFTER pmm_init().
  */
 void paging_init(void);
+
+/*
+ * Identity-map the 4 MB physical chunk that contains `phys_addr` using a
+ * PSE (4 MB) page directory entry.  Safe to call after paging_init().
+ *
+ * Use this to map MMIO regions (e.g. the VESA framebuffer) that lie outside
+ * the first 4 MB identity window.
+ *
+ * phys_addr: any address within the 4 MB chunk to map (will be 4 MB-aligned
+ *            internally).  Calling with an address already covered by an
+ *            existing PDE is harmless (overwrites with same value).
+ */
+void paging_map_frame(uint32_t phys_addr);

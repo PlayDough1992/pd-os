@@ -151,9 +151,9 @@ void keyboard_handler(void)
 
 char keyboard_getchar(void)
 {
-    while (kb_head == kb_tail)
-        __asm__ volatile ("hlt");
-
+    /* Non-blocking: return 0 immediately if the buffer is empty.
+       Callers use hlt in their event loop to wait for interrupts. */
+    if (kb_head == kb_tail) return 0;
     char c = kb_buf[kb_tail];
     kb_tail = (uint8_t)((kb_tail + 1) % KB_BUF_SIZE);
     return c;

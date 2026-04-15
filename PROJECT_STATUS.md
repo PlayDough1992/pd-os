@@ -220,6 +220,11 @@
 
 **Fix**: Removed journal entirely. `flush_dir_slot` writes exactly one sector (the one containing the changed dirent).
 
+### Boot Loops Back to Stage 2 Menu on First Enter — FIXED (April 13, 2026)
+**Root cause**: `proc_init()` and `proc_create()` were called *after* `sti` in `kernel_main`. On cold boot, ATA initialisation takes long enough for the PIT to fire at least one IRQ0 before the process table is set up. The `sched_irq` handler found `ticks_rem = 0` (BSS zero), decremented to -1, fell through to the round-robin search, found no runnable tasks, and returned `saved_esp = 0` for the "next" slot. `mov esp, 0` → `iret` from address 0 → triple fault → QEMU reset → Stage 2 reappeared. The second Enter worked because the proc table was fully initialised by then.
+
+**Fix**: Moved `proc_init()` + `proc_create("idle", idle_task)` to before `sti` in `kernel_main`, matching the `/* must be before sti */` comment already in `process.h`.
+
 ---
 
 ## 📊 Progress

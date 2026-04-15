@@ -36,7 +36,7 @@ CFLAGS="-m32 -ffreestanding -nostdlib -nostdinc -fno-builtin \
         -fno-stack-protector -nostartfiles -nodefaultlibs \
         -fno-pic -fno-pie \
         -Wall -Wextra -c"
-IFLAGS="-I$KERNEL_DIR/include"
+IFLAGS="-I$KERNEL_DIR/include -I$KERNEL_DIR/de/pdwm"
 LDFLAGS="-m elf_i386 -nostdlib"
 
 GREEN='\033[0;32m'
@@ -93,6 +93,11 @@ build() {
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/fat32.c"             -o "$BUILD_DIR/fat32.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/ext2.c"              -o "$BUILD_DIR/ext2.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/ntfs.c"              -o "$BUILD_DIR/ntfs.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/fs/fs_init.c"           -o "$BUILD_DIR/fs_init.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/gfx.c"           -o "$BUILD_DIR/gfx.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/mouse.c"         -o "$BUILD_DIR/mouse.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/rtc.c"           -o "$BUILD_DIR/rtc.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/de/pdwm/pdwm.c"          -o "$BUILD_DIR/pdwm.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/shell.c"            -o "$BUILD_DIR/shell.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/process.c"          -o "$BUILD_DIR/process.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/core/kernel.c"           -o "$BUILD_DIR/kernel_main.o"
@@ -122,8 +127,13 @@ build() {
         "$BUILD_DIR/fat32.o" \
         "$BUILD_DIR/ext2.o" \
         "$BUILD_DIR/ntfs.o" \
+        "$BUILD_DIR/fs_init.o" \
         "$BUILD_DIR/shell.o" \
         "$BUILD_DIR/process.o" \
+        "$BUILD_DIR/gfx.o" \
+        "$BUILD_DIR/mouse.o" \
+        "$BUILD_DIR/rtc.o" \
+        "$BUILD_DIR/pdwm.o" \
         "$BUILD_DIR/kernel_main.o" \
         -o "$KERNEL_ELF"
 
