@@ -148,8 +148,8 @@ void wm_toggle_maximized(gde_window_t *win)
         win->prev_w = win->w; win->prev_h = win->h;
         win->x = 0;
         win->y = 0;
-        win->w = GDE_SCREEN_W;
-        win->h = GDE_SCREEN_H - GDE_TASKBAR_H;
+        win->w = gfx_width();
+        win->h = gfx_height() - GDE_TASKBAR_H;
         win->state = GDE_WIN_MAXIMIZED;
     }
 }

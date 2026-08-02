@@ -56,7 +56,7 @@ build_gde() {
 
     # --- Stage 2 (VBE-enabled) ---
     echo -e "${CYAN}  [2] Assembling Stage 2 (VBE)...${NC}"
-    nasm -f bin "$STAGE2_SRC" -o "$STAGE2_BIN"
+    nasm -f bin -DGDE_BUILD "$STAGE2_SRC" -o "$STAGE2_BIN"
     S2SIZE=$(wc -c < "$STAGE2_BIN")
     if [ "$S2SIZE" -gt 3072 ]; then
         echo -e "${RED}[FAIL] Stage 2 is $S2SIZE bytes — exceeds 6-sector limit${NC}"
@@ -66,6 +66,9 @@ build_gde() {
 
     # --- Kernel (GDE build) ---
     echo -e "${CYAN}  [3] Compiling GDE kernel...${NC}"
+
+    # Generate cursor sprite from PNG (requires python3-pil; skipped gracefully if absent)
+    python3 "$KERNEL_DIR/PNG/gen_cursor.py" 2>/dev/null || true
 
     nasm -f elf32 "$KERNEL_DIR/arch/x86/entry.asm"         -o "$BUILD_DIR/entry.o"
     nasm -f elf32 "$KERNEL_DIR/arch/x86/idt.asm"           -o "$BUILD_DIR/idt_stubs.o"
@@ -81,6 +84,8 @@ build_gde() {
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/pit.c"          -o "$BUILD_DIR/pit.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/keyboard.c"     -o "$BUILD_DIR/keyboard.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/ata.c"          -o "$BUILD_DIR/ata.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/pci.c"          -o "$BUILD_DIR/pci.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/usb.c"          -o "$BUILD_DIR/usb.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/gfx.c"          -o "$BUILD_DIR/gfx.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/mouse.c"         -o "$BUILD_DIR/mouse.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/rtl8139.c"       -o "$BUILD_DIR/rtl8139.o"
@@ -132,6 +137,8 @@ build_gde() {
         "$BUILD_DIR/pit.o" \
         "$BUILD_DIR/keyboard.o" \
         "$BUILD_DIR/ata.o" \
+        "$BUILD_DIR/pci.o" \
+        "$BUILD_DIR/usb.o" \
         "$BUILD_DIR/gfx.o" \
         "$BUILD_DIR/mouse.o" \
         "$BUILD_DIR/rtl8139.o" \

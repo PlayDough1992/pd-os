@@ -6,21 +6,23 @@
 #include "boot_info.h"
 #include "kernel.h"
 #include "paging.h"
+#include "cursor_data.h"
 
 /* ---- Driver state -------------------------------------------------------- */
 
-/* Physical 0x400000: off-screen back buffer.  All draw calls target here.
- * Physical 0x800000: pre-rendered desktop background snapshot.  The expensive
- * gradient+grid is rendered once at desktop_init(); each frame just memcpy's
- * the snapshot into the back buffer before compositing windows on top.
- * Both regions are mapped as 4 MB PSE large pages in gfx_init(). */
-#define GFX_BACKBUF_PHYS  0x400000u
-#define GFX_BGCACHE_PHYS  0x800000u
-/* The 4 MB PSE page at 0x800000 holds the 3 MB bg snapshot (768 rows × 1024
- * uint32s) and leaves 1 MB free at 0xB00000.  We use that as a drag content
- * cache — a pre-rendered snapshot of the dragged window's content area. */
-#define GFX_DRAGCACHE_PHYS  (GFX_BGCACHE_PHYS + 3u * 1024u * 1024u)
-#define GFX_DRAGCACHE_PIXELS (1024u * 1024u / 4u)  /* 256 K pixels */
+/* Memory layout — each region uses 4 MB PSE identity-mapped pages.
+ * Two pages each for back buffer and bg cache gives 8 MB per region,
+ * enough for 1920×1080×32bpp (= 7.9 MB).
+ *
+ *  0x0400000 – 0x07FFFFF  back buffer   page 1 (4 MB)
+ *  0x0800000 – 0x0BFFFFF  back buffer   page 2 (4 MB)
+ *  0x0C00000 – 0x0FFFFFF  bg cache      page 1 (4 MB)
+ *  0x1000000 – 0x13FFFFF  bg cache      page 2 (4 MB)
+ *  0x1400000 – 0x17FFFFF  drag cache    page   (4 MB) */
+#define GFX_BACKBUF_PHYS     0x400000u
+#define GFX_BGCACHE_PHYS     0xC00000u
+#define GFX_DRAGCACHE_PHYS   0x1400000u
+#define GFX_DRAGCACHE_PIXELS (1024u * 1024u)  /* 4 MB drag cache */
 
 static uint32_t *g_fb       = (void *)0;  /* drawing target  = back buffer  */
 static uint32_t *g_fb_real  = (void *)0;  /* real VBE framebuffer           */
@@ -54,8 +56,11 @@ static inline uint32_t gfx_rd(int x, int y) {
 
 void gfx_init(uint32_t fb_addr, uint16_t width, uint16_t height, uint16_t pitch)
 {
-    paging_map_framebuffer(GFX_BACKBUF_PHYS);
-    paging_map_framebuffer(GFX_BGCACHE_PHYS);
+    paging_map_framebuffer(GFX_BACKBUF_PHYS);           /* 0x0400000 */
+    paging_map_framebuffer(GFX_BACKBUF_PHYS + 0x400000u); /* 0x0800000 */
+    paging_map_framebuffer(GFX_BGCACHE_PHYS);           /* 0x0C00000 */
+    paging_map_framebuffer(GFX_BGCACHE_PHYS + 0x400000u); /* 0x1000000 */
+    paging_map_framebuffer(GFX_DRAGCACHE_PHYS);          /* 0x1400000 */
 
     g_fb_real   = (uint32_t *)fb_addr;
     g_fb        = (uint32_t *)GFX_BACKBUF_PHYS;
@@ -174,6 +179,95 @@ void gfx_dragstamp(int dx, int dy)
 }
 
 int gfx_dragcache_valid(void) { return g_drag_cache_w > 0; }
+
+/* Corner pixel save/restore for true transparent rounded corners.
+ * Iterates the same set of pixels as gfx_round_corners but reads/writes g_fb.
+ * buf must hold at least 4*r*r uint32_t elements. */
+void gfx_save_corners(int x, int y, int w, int h, int r, uint32_t *buf)
+{
+    int px, py, r2 = r*r, n = 0;
+    for (py=y; py<y+r; py++) for (px=x; px<x+r; px++) {
+        int dx=px-(x+r), dy=py-(y+r);
+        if (dx*dx+dy*dy > r2 && px>=0 && px<g_width && py>=0 && py<g_height)
+            buf[n++] = g_fb[py*g_pitch4+px];
+    }
+    for (py=y; py<y+r; py++) for (px=x+w-r; px<x+w; px++) {
+        int dx=px-(x+w-1-r), dy=py-(y+r);
+        if (dx*dx+dy*dy > r2 && px>=0 && px<g_width && py>=0 && py<g_height)
+            buf[n++] = g_fb[py*g_pitch4+px];
+    }
+    for (py=y+h-r; py<y+h; py++) for (px=x; px<x+r; px++) {
+        int dx=px-(x+r), dy=py-(y+h-1-r);
+        if (dx*dx+dy*dy > r2 && px>=0 && px<g_width && py>=0 && py<g_height)
+            buf[n++] = g_fb[py*g_pitch4+px];
+    }
+    for (py=y+h-r; py<y+h; py++) for (px=x+w-r; px<x+w; px++) {
+        int dx=px-(x+w-1-r), dy=py-(y+h-1-r);
+        if (dx*dx+dy*dy > r2 && px>=0 && px<g_width && py>=0 && py<g_height)
+            buf[n++] = g_fb[py*g_pitch4+px];
+    }
+}
+
+/* Must iterate in identical order to gfx_save_corners. */
+void gfx_restore_corners(int x, int y, int w, int h, int r, const uint32_t *buf)
+{
+    int px, py, r2 = r*r, n = 0;
+    for (py=y; py<y+r; py++) for (px=x; px<x+r; px++) {
+        int dx=px-(x+r), dy=py-(y+r);
+        if (dx*dx+dy*dy > r2 && px>=0 && px<g_width && py>=0 && py<g_height)
+            g_fb[py*g_pitch4+px] = buf[n++];
+    }
+    for (py=y; py<y+r; py++) for (px=x+w-r; px<x+w; px++) {
+        int dx=px-(x+w-1-r), dy=py-(y+r);
+        if (dx*dx+dy*dy > r2 && px>=0 && px<g_width && py>=0 && py<g_height)
+            g_fb[py*g_pitch4+px] = buf[n++];
+    }
+    for (py=y+h-r; py<y+h; py++) for (px=x; px<x+r; px++) {
+        int dx=px-(x+r), dy=py-(y+h-1-r);
+        if (dx*dx+dy*dy > r2 && px>=0 && px<g_width && py>=0 && py<g_height)
+            g_fb[py*g_pitch4+px] = buf[n++];
+    }
+    for (py=y+h-r; py<y+h; py++) for (px=x+w-r; px<x+w; px++) {
+        int dx=px-(x+w-1-r), dy=py-(y+h-1-r);
+        if (dx*dx+dy*dy > r2 && px>=0 && px<g_width && py>=0 && py<g_height)
+            g_fb[py*g_pitch4+px] = buf[n++];
+    }
+}
+
+/* Punch rounded corners from bg-cache (legacy: single static background). */
+void gfx_round_corners(int x, int y, int w, int h, int r)
+{
+    int px, py, r2 = r * r;
+    /* Top-left: circle center (x+r, y+r) */
+    for (py = y; py < y + r; py++)
+        for (px = x; px < x + r; px++) {
+            int dx = px-(x+r), dy = py-(y+r);
+            if (dx*dx+dy*dy > r2 && px>=0 && px<g_width && py>=0 && py<g_height)
+                g_fb[py*g_pitch4+px] = g_bg_cache[py*g_pitch4+px];
+        }
+    /* Top-right: circle center (x+w-1-r, y+r) */
+    for (py = y; py < y + r; py++)
+        for (px = x+w-r; px < x+w; px++) {
+            int dx = px-(x+w-1-r), dy = py-(y+r);
+            if (dx*dx+dy*dy > r2 && px>=0 && px<g_width && py>=0 && py<g_height)
+                g_fb[py*g_pitch4+px] = g_bg_cache[py*g_pitch4+px];
+        }
+    /* Bottom-left: circle center (x+r, y+h-1-r) */
+    for (py = y+h-r; py < y+h; py++)
+        for (px = x; px < x+r; px++) {
+            int dx = px-(x+r), dy = py-(y+h-1-r);
+            if (dx*dx+dy*dy > r2 && px>=0 && px<g_width && py>=0 && py<g_height)
+                g_fb[py*g_pitch4+px] = g_bg_cache[py*g_pitch4+px];
+        }
+    /* Bottom-right: circle center (x+w-1-r, y+h-1-r) */
+    for (py = y+h-r; py < y+h; py++)
+        for (px = x+w-r; px < x+w; px++) {
+            int dx = px-(x+w-1-r), dy = py-(y+h-1-r);
+            if (dx*dx+dy*dy > r2 && px>=0 && px<g_width && py>=0 && py<g_height)
+                g_fb[py*g_pitch4+px] = g_bg_cache[py*g_pitch4+px];
+        }
+}
+
 /* Tracks the union of all regions that changed this frame.
  * desktop_present() uses this to decide whether to do a partial or full
  * render + flip.  Call gfx_dirty_reset() after presenting. */
@@ -242,6 +336,29 @@ void gfx_flip(void)
 int gfx_width(void)  { return g_width;  }
 int gfx_height(void) { return g_height; }
 
+/* Switch VBE mode via Bochs BGA I/O ports (accessible from ring 0). */
+static inline void vbe_reg_write(uint16_t idx, uint16_t val)
+{
+    __asm__ volatile("outw %0, %1" :: "a"(idx), "Nd"((uint16_t)0x01CE));
+    __asm__ volatile("outw %0, %1" :: "a"(val), "Nd"((uint16_t)0x01CF));
+}
+
+void gfx_set_resolution(int w, int h)
+{
+    vbe_reg_write(4, 0);              /* disable VBE        */
+    vbe_reg_write(1, (uint16_t)w);   /* set width          */
+    vbe_reg_write(2, (uint16_t)h);   /* set height         */
+    vbe_reg_write(3, 32);            /* bpp = 32           */
+    vbe_reg_write(4, 0x41);          /* enable + LFB       */
+    g_width     = w;
+    g_height    = h;
+    g_pitch4    = w;
+    g_fb_pitch4 = w;
+    /* Clear back buffer so old-stride pixels don't bleed into the new frame. */
+    { uint32_t n = (uint32_t)w * (uint32_t)h, *p = g_fb;
+      __asm__ volatile ("rep stosl" : "+D"(p), "+c"(n) : "a"(0u) : "memory"); }
+}
+
 /* Copy only a clipped w×h rectangle from back buffer to the real FB.
  * Used to update just the cursor region — ~500 pixels instead of 3 MB. */
 void gfx_flip_rect(int x, int y, int w, int h)
@@ -283,6 +400,20 @@ void gfx_flip_rect(int x, int y, int w, int h)
  * sprite: w*h pixel array (only opaque entries are used).
  * mask:   w*h byte array; 1 = opaque pixel, 0 = transparent.
  * save:   caller-allocated w*h uint32_t scratch buffer. */
+
+/* Use PNG-sourced cursor data (generated by kernel/PNG/gen_cursor.py). */
+void gfx_cursor_build_arrow(uint32_t *sprite, uint8_t *mask, int w, int h)
+{
+    int r, c;
+    for (r = 0; r < h; r++)
+        for (c = 0; c < w; c++) { sprite[r*w+c] = 0; mask[r*w+c] = 0; }
+    for (r = 0; r < h && r < PD_CURSOR_H; r++)
+        for (c = 0; c < w && c < PD_CURSOR_W; c++) {
+            sprite[r*w+c] = pd_cursor_sprite[r*PD_CURSOR_W+c];
+            mask[r*w+c]   = pd_cursor_mask[r*PD_CURSOR_W+c];
+        }
+}
+
 void gfx_cursor_blit(int ox, int oy, int nx, int ny, int w, int h,
                      const uint32_t *sprite, const uint8_t *mask, uint32_t *save)
 {

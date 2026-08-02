@@ -77,33 +77,8 @@ static int      s_cursor_y = -999;
 
 static void ls_cursor_sprite_init(void)
 {
-    int r, c;
-    for (r = 0; r < LS_CURSOR_H; r++)
-        for (c = 0; c < LS_CURSOR_W; c++)
-            s_cursor_mask[r * LS_CURSOR_W + c] = 0;
-
-    /* Arrow head: rows 0..11 — left edge BLACK, interior WHITE, diagonal BLACK */
-    for (r = 0; r <= 11; r++) {
-        s_cursor_sprite[r * LS_CURSOR_W + 0] = GFX_BLACK;
-        s_cursor_mask  [r * LS_CURSOR_W + 0] = 1;
-        for (c = 1; c < r; c++) {
-            s_cursor_sprite[r * LS_CURSOR_W + c] = GFX_WHITE;
-            s_cursor_mask  [r * LS_CURSOR_W + c] = 1;
-        }
-        if (r > 0) {
-            s_cursor_sprite[r * LS_CURSOR_W + r] = GFX_BLACK;
-            s_cursor_mask  [r * LS_CURSOR_W + r] = 1;
-        }
-    }
-    /* Stalk: rows 12..17, columns 0..2 */
-    for (r = 12; r < LS_CURSOR_H; r++) {
-        s_cursor_sprite[r * LS_CURSOR_W + 0] = GFX_BLACK;
-        s_cursor_sprite[r * LS_CURSOR_W + 1] = GFX_WHITE;
-        s_cursor_sprite[r * LS_CURSOR_W + 2] = GFX_BLACK;
-        s_cursor_mask  [r * LS_CURSOR_W + 0] = 1;
-        s_cursor_mask  [r * LS_CURSOR_W + 1] = 1;
-        s_cursor_mask  [r * LS_CURSOR_W + 2] = 1;
-    }
+    gfx_cursor_build_arrow(s_cursor_sprite, s_cursor_mask,
+                           LS_CURSOR_W, LS_CURSOR_H);
 }
 
 /* Move cursor to (nx,ny) using the atomic union-rect blit — zero flicker. */
@@ -174,7 +149,7 @@ static void draw_string_2x(int x, int y, const char *s, uint32_t fg)
 static int card_x(int i, int n)
 {
     int total_w = n * CARD_W + (n - 1) * CARD_GAP;
-    int start   = (GDE_SCREEN_W - total_w) / 2;
+    int start   = (gfx_width() - total_w) / 2;
     return start + i * (CARD_W + CARD_GAP);
 }
 
@@ -187,7 +162,7 @@ static void ls_draw_scene(void)
     int i, n = s_nusers;
 
     /* Background gradient */
-    gfx_fill_rect_grad(0, 0, GDE_SCREEN_W, GDE_SCREEN_H,
+    gfx_fill_rect_grad(0, 0, gfx_width(), gfx_height(),
                        GFX_RGB(22, 28, 45),
                        GFX_RGB( 8, 12, 25));
 
@@ -195,7 +170,7 @@ static void ls_draw_scene(void)
     {
         const char *title = "PD-OS";
         int tw = ls_strlen(title) * 16;   /* 2× chars = 16px each */
-        draw_string_2x((GDE_SCREEN_W - tw) / 2, 110, title,
+        draw_string_2x((gfx_width() - tw) / 2, 110, title,
                        GFX_RGB(230, 235, 255));
     }
 
@@ -204,7 +179,7 @@ static void ls_draw_scene(void)
         const char *sub = (s_sel < 0) ? "Select a user to sign in"
                                       : "Enter your password";
         int sw = gfx_string_w(sub);
-        gfx_draw_string((GDE_SCREEN_W - sw) / 2, 160, sub,
+        gfx_draw_string((gfx_width() - sw) / 2, 160, sub,
                         GFX_RGB(170, 175, 200), 0, 1);
     }
 
@@ -274,14 +249,14 @@ static void ls_draw_scene(void)
         {
             const char *lbl = "Password:";
             int lw = gfx_string_w(lbl);
-            int lx = (GDE_SCREEN_W - PASS_BOX_W) / 2;
+            int lx = (gfx_width() - PASS_BOX_W) / 2;
             gfx_draw_string(lx, PASS_TOP - 20, lbl,
                             GFX_RGB(180, 185, 210), 0, 1);
             (void)lw;
         }
 
         /* Input box background */
-        int bx = (GDE_SCREEN_W - PASS_BOX_W) / 2;
+        int bx = (gfx_width() - PASS_BOX_W) / 2;
         int by = PASS_TOP;
         gfx_fill_rect(bx, by, PASS_BOX_W, PASS_BOX_H, GFX_RGB(15, 20, 35));
         gfx_draw_rect(bx, by, PASS_BOX_W, PASS_BOX_H,
@@ -307,7 +282,7 @@ static void ls_draw_scene(void)
         if (s_error > 0) {
             const char *err = "Incorrect password. Try again.";
             int ew = gfx_string_w(err);
-            gfx_draw_string((GDE_SCREEN_W - ew) / 2,
+            gfx_draw_string((gfx_width() - ew) / 2,
                             PASS_TOP + PASS_BOX_H + 10,
                             err, GFX_RGB(220, 70, 70), 0, 1);
         }
@@ -316,7 +291,7 @@ static void ls_draw_scene(void)
         if (s_error == 0 && s_welcome == 0) {
             const char *hint = "Press Enter to sign in";
             int hw = gfx_string_w(hint);
-            gfx_draw_string((GDE_SCREEN_W - hw) / 2,
+            gfx_draw_string((gfx_width() - hw) / 2,
                             PASS_TOP + PASS_BOX_H + 10,
                             hint, GFX_RGB(100, 110, 140), 0, 1);
         }
@@ -327,7 +302,7 @@ static void ls_draw_scene(void)
         const user_t *u = users_get_by_index(s_sel);
         if (u) {
             /* Semi-transparent overlay (approximated with a dark rect) */
-            gfx_fill_rect(0, 0, GDE_SCREEN_W, GDE_SCREEN_H,
+            gfx_fill_rect(0, 0, gfx_width(), gfx_height(),
                           GFX_RGB(10, 15, 25));
 
             /* "Welcome, <name>" */
@@ -341,8 +316,8 @@ static void ls_draw_scene(void)
             msg[mi]   = '\0';
 
             int tw = ls_strlen(msg) * 16;
-            draw_string_2x((GDE_SCREEN_W - tw) / 2,
-                           (GDE_SCREEN_H - 32) / 2,
+            draw_string_2x((gfx_width() - tw) / 2,
+                           (gfx_height() - 32) / 2,
                            msg, GFX_RGB(200, 220, 255));
         }
     }
@@ -371,6 +346,9 @@ void login_screen_run(void)
     for (;;) {
         int scene_dirty  = 0;   /* cards/password/title changed */
         int cursor_dirty = 0;   /* only mouse moved */
+
+        /* Drain any buffered PS/2 AUX bytes before checking state */
+        mouse_poll();
 
         /* ---- Keyboard ---- */
         char k;

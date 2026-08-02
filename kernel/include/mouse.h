@@ -8,6 +8,7 @@
 
 void    mouse_init(void);
 void    mouse_handler(void);   /* called from IRQ12 */
+void    mouse_poll(void);      /* drain 8042 AUX buffer; call from event loops */
 
 int     mouse_get_x(void);
 int     mouse_get_y(void);

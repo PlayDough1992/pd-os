@@ -12,7 +12,7 @@ static int g_startmenu_open = 0;
 
 #define MENU_X      2
 #define MENU_ITEM_H 22
-#define START_BTN_W 68
+#define START_BTN_W 36
 
 /* Items in the start menu (populated externally via callbacks) */
 static gde_menu_item_t g_menu_items[GDE_MAX_MENU_ITEMS];
@@ -57,21 +57,21 @@ static void draw_clock(void)
     buf[5] = '\0';
 
     int tw = gfx_string_w(buf);
-    int tx = GDE_SCREEN_W - tw - 8;
-    int ty = GDE_SCREEN_H - GDE_TASKBAR_H + (GDE_TASKBAR_H - GFX_CHAR_H) / 2;
+    int tx = gfx_width() - tw - 8;
+    int ty = gfx_height() - GDE_TASKBAR_H + (GDE_TASKBAR_H - GFX_CHAR_H) / 2;
     gfx_draw_string(tx, ty, buf, GFX_RGB(220,220,220), COL_TASKBAR, 0);
 }
 
 void taskbar_render(void)
 {
-    int y0 = GDE_SCREEN_H - GDE_TASKBAR_H;
+    int y0 = gfx_height() - GDE_TASKBAR_H;
 
     /* Background gradient */
-    gfx_fill_rect_grad(0, y0, GDE_SCREEN_W, GDE_TASKBAR_H,
+    gfx_fill_rect_grad(0, y0, gfx_width(), GDE_TASKBAR_H,
                         GFX_RGB(42,42,48), GFX_RGB(28,28,34));
 
     /* Top separator line */
-    gfx_hline(0, y0, GDE_SCREEN_W, GFX_RGB(65,65,75));
+    gfx_hline(0, y0, gfx_width(), GFX_RGB(65,65,75));
 
     /* Start button */
     uint32_t sbg = g_startmenu_open ? GFX_RGB(55,90,170) : GFX_RGB(45,75,145);
@@ -79,8 +79,8 @@ void taskbar_render(void)
     gfx_draw_rect(2, y0 + 2, START_BTN_W, GDE_TASKBAR_H - 4,
                    g_startmenu_open ? GFX_RGB(100,140,220) : GFX_RGB(80,110,190));
     int sy = y0 + (GDE_TASKBAR_H - GFX_CHAR_H) / 2;
-    gfx_draw_string(2 + (START_BTN_W - gfx_string_w("  Start  ")) / 2,
-                    sy, "  Start  ", GFX_WHITE, sbg, 0);
+    gfx_draw_string(2 + (START_BTN_W - gfx_string_w("PD")) / 2,
+                    sy, "PD", GFX_WHITE, sbg, 0);
 
     /* Window buttons — one per non-minimized window */
     int bx = START_BTN_W + 6;
@@ -89,7 +89,7 @@ void taskbar_render(void)
         gde_window_t *w = wm_get(bi);
         if (!w) continue;
         int bw = 120;
-        if (bx + bw > GDE_SCREEN_W - 100) break;
+        if (bx + bw > gfx_width() - 100) break;
         uint32_t bbg = (w->focused && w->state != GDE_WIN_MINIMIZED)
                         ? GFX_RGB(55,90,170) : GFX_RGB(50,50,58);
         gfx_fill_rect(bx, y0 + 3, bw, GDE_TASKBAR_H - 6, bbg);
@@ -145,17 +145,17 @@ int taskbar_menu_open(void) { return g_startmenu_open; }
 
 int taskbar_handle_click(int x, int y)
 {
-    int y0 = GDE_SCREEN_H - GDE_TASKBAR_H;
+    int y0 = gfx_height() - GDE_TASKBAR_H;
 
     /* Click on start button */
-    if (y >= y0 && y < GDE_SCREEN_H && x >= 2 && x < 2 + START_BTN_W) {
+    if (y >= y0 && y < gfx_height() && x >= 2 && x < 2 + START_BTN_W) {
         g_startmenu_open ^= 1;
         g_hover_item = -1;
         return 1;
     }
 
     /* Click on taskbar window button */
-    if (y >= y0 && y < GDE_SCREEN_H) {
+    if (y >= y0 && y < gfx_height()) {
         int bx = START_BTN_W + 6;
         int bi;
         for (bi = 0; bi < wm_count(); bi++) {
@@ -203,7 +203,7 @@ int taskbar_handle_click(int x, int y)
 void taskbar_menu_hover(int x, int y)
 {
     if (!g_startmenu_open) return;
-    int y0     = GDE_SCREEN_H - GDE_TASKBAR_H;
+    int y0     = gfx_height() - GDE_TASKBAR_H;
     int menu_h = g_menu_n * MENU_ITEM_H + 8;
     int menu_y = y0 - menu_h;
     int menu_w = 180;
@@ -224,7 +224,7 @@ void taskbar_get_menu_rect(int *ox, int *oy, int *ow, int *oh)
     int menu_w = 180 + 4;  /* +4 for shadow */
     int menu_h = g_menu_n * MENU_ITEM_H + 8 + 4;
     *ox = MENU_X;
-    *oy = GDE_SCREEN_H - GDE_TASKBAR_H - menu_h;
+    *oy = gfx_height() - GDE_TASKBAR_H - menu_h;
     *ow = menu_w;
     *oh = menu_h + GDE_TASKBAR_H;  /* include taskbar row (start button state changes) */
 }

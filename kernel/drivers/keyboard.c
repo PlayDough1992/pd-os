@@ -167,3 +167,13 @@ char keyboard_poll(void)
     kb_tail = (uint8_t)((kb_tail + 1) % KB_BUF_SIZE);
     return c;
 }
+
+/* Inject a character into the keyboard ring (called from usb_keyboard_poll) */
+void keyboard_inject(char c)
+{
+    uint8_t next = (uint8_t)((kb_head + 1) % KB_BUF_SIZE);
+    if (next != kb_tail) {
+        kb_buf[kb_head] = c;
+        kb_head = next;
+    }
+}

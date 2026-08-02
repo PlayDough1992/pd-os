@@ -4,9 +4,7 @@
 
 #include "mouse.h"
 #include "pic.h"
-
-#define SCREEN_W 1024
-#define SCREEN_H  768
+#include "gfx.h"
 
 /* 8042 ports */
 #define PS2_DATA    0x60
@@ -27,8 +25,8 @@ static inline uint8_t inb(uint16_t port)
 
 /* ---- State --------------------------------------------------------------- */
 
-static int     g_mx       = SCREEN_W / 2;
-static int     g_my       = SCREEN_H / 2;
+static int     g_mx       = 0;
+static int     g_my       = 0;
 static uint8_t g_buttons  = 0;
 static int     g_changed  = 0;
 /* Press latch: bits set when a button transitions 0→1 in the ISR.
@@ -80,33 +78,51 @@ static uint8_t ps2_read_data(void)
 
 /* ---- Init ---------------------------------------------------------------- */
 
+/* Drain everything currently in the 8042 output buffer */
+static void ps2_flush(void)
+{
+    int t = 32;
+    while (t-- > 0 && (inb(PS2_STATUS) & 0x01))
+        (void)inb(PS2_DATA);
+}
+
 void mouse_init(void)
 {
+    /* Flush any BIOS/keyboard leftovers before touching the AUX port */
+    ps2_flush();
+
     /* 1. Enable AUX device */
     ps2_wait_write();
     outb(PS2_CMD, 0xA8);
 
-    /* 2. Read current config byte, enable AUX IRQ (bit 1), clear AUX disable (bit 5) */
+    /* Flush bytes the 8042 may put out when AUX port opens */
+    ps2_flush();
+
+    /* 2. Read CCB, enable AUX IRQ (bit 1), clear AUX disable (bit 5) */
     ps2_wait_write();
     outb(PS2_CMD, 0x20);
     uint8_t cfg = ps2_read_data();
-    cfg |=  (1u << 1);   /* enable IRQ12 */
-    cfg &= ~(1u << 5);   /* clear AUX clock disable */
+    cfg |=  (1u << 1);
+    cfg &= ~(1u << 5);
     ps2_wait_write();
     outb(PS2_CMD, 0x60);
     ps2_write_data(cfg);
 
-    /* 3. Set mouse defaults */
-    ps2_write_mouse(0xF6);
-    ps2_read_data();  /* ACK */
+    /* 3. Set resolution to max (8 counts/mm) then enable streaming */
+    ps2_write_mouse(0xE8);  /* Set Resolution */
+    ps2_read_data();
+    ps2_write_mouse(0x03);  /* 8 counts/mm */
+    ps2_read_data();
+    ps2_write_mouse(0xF4);  /* Enable Streaming */
+    /* Drain ACK (0xFA) with a generous spin */
+    {
+        int t = 200000;
+        while (t-- > 0 && !(inb(PS2_STATUS) & 0x01)) ;
+        if (inb(PS2_STATUS) & 0x01)
+            (void)inb(PS2_DATA);
+    }
 
-    /* 4. Enable mouse streaming */
-    ps2_write_mouse(0xF4);
-    ps2_read_data();  /* ACK */
-
-    /* 5. Unmask IRQ12 so we receive mouse packets.
-     *    Also unmask IRQ2 (master PIC cascade line) — required for any
-     *    slave PIC interrupt (IRQ8-15) to reach the CPU. */
+    /* 4. Unmask IRQ2 (cascade) + IRQ12 */
     pic_unmask_irq(2);
     pic_unmask_irq(12);
 }
@@ -124,10 +140,10 @@ void mouse_handler(void)
     if (g_phase < 3) return;
     g_phase = 0;
 
-    /* Decode the 3-byte packet */
+    /* Decode the 3-byte packet using sign bits from flags (9-bit 2's complement) */
     uint8_t flags = g_buf[0];
-    int     dx    = (int)(int8_t)g_buf[1];
-    int     dy    = (int)(int8_t)g_buf[2];
+    int     dx    = (flags & 0x10) ? (int)g_buf[1] - 256 : (int)g_buf[1];
+    int     dy    = (flags & 0x20) ? (int)g_buf[2] - 256 : (int)g_buf[2];
 
     /* Ignore overflow packets */
     if (flags & 0xC0) return;
@@ -136,10 +152,10 @@ void mouse_handler(void)
     g_mx += dx;
     g_my -= dy;
 
-    if (g_mx < 0)         g_mx = 0;
-    if (g_mx >= SCREEN_W) g_mx = SCREEN_W - 1;
-    if (g_my < 0)         g_my = 0;
-    if (g_my >= SCREEN_H) g_my = SCREEN_H - 1;
+    if (g_mx < 0)              g_mx = 0;
+    if (g_mx >= gfx_width())   g_mx = gfx_width()  - 1;
+    if (g_my < 0)              g_my = 0;
+    if (g_my >= gfx_height())  g_my = gfx_height() - 1;
 
     uint8_t new_buttons  = flags & 0x07u;
     uint8_t newly_pressed = (uint8_t)(~g_buttons & new_buttons); /* 0→1 bits */
@@ -166,3 +182,13 @@ void mouse_clear_changed(void)
 
 uint8_t mouse_get_btn_latch(void)   { return g_btn_latch; }
 void    mouse_clear_btn_latch(void) { g_btn_latch = 0; }
+
+/* Drain pending PS/2 bytes from the 8042 output buffer (AUX only).
+ * No cli/sti — called frequently from event loops. */
+void mouse_poll(void)
+{
+    uint8_t st;
+    /* Require both OBF (bit 0) and AUX (bit 5) — skip keyboard bytes */
+    while (((st = inb(PS2_STATUS)) & 0x01) && (st & 0x20))
+        mouse_handler();
+}

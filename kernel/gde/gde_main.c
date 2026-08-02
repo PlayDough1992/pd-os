@@ -20,6 +20,7 @@ static void gde_hw_init(void)
 {
     volatile boot_info_t *bi = g_boot_info;
     paging_map_framebuffer(bi->vbe_fb);
+    paging_map_framebuffer(bi->vbe_fb + 0x400000u); /* second 4 MB PSE page for ≥1366×768 */
     gfx_init((uint32_t)bi->vbe_fb,
               bi->vbe_width, bi->vbe_height, bi->vbe_pitch);
     mouse_init();
@@ -38,13 +39,16 @@ static void gde_run_desktop(void)
     for (;;) {
         int dirty = 0;
 
+        /* Drain any buffered PS/2 AUX bytes before checking state */
+        mouse_poll();
+
         /* ---- Keyboard ---- */
         char k;
         while ((k = keyboard_poll()) != 0) {
             desktop_handle_key(k);
             /* Keyboard changes window content — mark full screen to ensure
              * the changed window region is sent to the framebuffer. */
-            gfx_dirty_mark(0, 0, GDE_SCREEN_W, GDE_SCREEN_H);
+            gfx_dirty_mark(0, 0, gfx_width(), gfx_height());
             dirty = 1;
         }
 
@@ -67,8 +71,8 @@ static void gde_run_desktop(void)
             if (now_sec != last_sec) {
                 last_sec = now_sec;
                 /* Mark only the taskbar strip dirty — cheap 1024×30 partial flip */
-                gfx_dirty_mark(0, GDE_SCREEN_H - GDE_TASKBAR_H,
-                               GDE_SCREEN_W, GDE_TASKBAR_H);
+                gfx_dirty_mark(0, gfx_height() - GDE_TASKBAR_H,
+                               gfx_width(), GDE_TASKBAR_H);
                 dirty = 1;
             }
         }

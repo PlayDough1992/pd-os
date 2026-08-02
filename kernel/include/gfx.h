@@ -48,6 +48,9 @@ void gfx_init(uint32_t fb_addr, uint16_t width, uint16_t height, uint16_t pitch)
 int gfx_width(void);
 int gfx_height(void);
 
+/* Switch VBE resolution at runtime via Bochs BGA registers. */
+void gfx_set_resolution(int w, int h);
+
 /* ---- Primitives ---------------------------------------------------------- */
 
 void     gfx_putpixel(int x, int y, uint32_t color);
@@ -90,6 +93,20 @@ void gfx_restore_region(int x, int y, int w, int h, const uint32_t *src);
  * save: caller-allocated w*h uint32_t scratch buffer. */
 void gfx_cursor_blit(int ox, int oy, int nx, int ny, int w, int h,
                      const uint32_t *sprite, const uint8_t *mask, uint32_t *save);
+
+/* Build the standard 14×18 arrow cursor sprite and mask into caller buffers. */
+void gfx_cursor_build_arrow(uint32_t *sprite, uint8_t *mask, int w, int h);
+
+/* Rounded-corner helpers.
+ * gfx_save_corners / gfx_restore_corners: save the "outside" corner pixels from
+ * the live back-buffer before drawing a window, then restore them afterwards so
+ * the corners show whatever was composited behind (other windows or desktop).
+ * buf must hold at least 4*r*r uint32_t elements. */
+void gfx_save_corners   (int x, int y, int w, int h, int r, uint32_t *buf);
+void gfx_restore_corners(int x, int y, int w, int h, int r, const uint32_t *buf);
+
+/* Legacy: punch corners from the static bg-cache (desktop-only background). */
+void gfx_round_corners(int x, int y, int w, int h, int r);
 
 /* ---- Blending ------------------------------------------------------------ */
 

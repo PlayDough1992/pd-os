@@ -13,6 +13,7 @@
  * ============================================================================ */
 
 #include "rtl8139.h"
+#include "pci.h"
 #include "paging.h"
 #include "pic.h"
 #include "io.h"
@@ -118,31 +119,8 @@ static inline uint16_t inw(uint16_t port)
 static inline uint32_t inl(uint16_t port)
 { uint32_t r; __asm__ volatile ("inl %1,%0":"=a"(r):"Nd"(port)); return r; }
 
-/* ============================================================================
- * Minimal PCI config space access (ports 0xCF8 / 0xCFC)
- * ============================================================================ */
-static uint32_t pci_read(uint8_t bus, uint8_t slot, uint8_t func, uint8_t off)
-{
-    uint32_t addr = (1u << 31)
-                  | ((uint32_t)bus  << 16)
-                  | ((uint32_t)slot << 11)
-                  | ((uint32_t)func <<  8)
-                  | (off & 0xFCu);
-    outl(0xCF8u, addr);
-    return inl(0xCFCu);
-}
-
-static void pci_write(uint8_t bus, uint8_t slot, uint8_t func,
-                      uint8_t off, uint32_t val)
-{
-    uint32_t addr = (1u << 31)
-                  | ((uint32_t)bus  << 16)
-                  | ((uint32_t)slot << 11)
-                  | ((uint32_t)func <<  8)
-                  | (off & 0xFCu);
-    outl(0xCF8u, addr);
-    outl(0xCFCu, val);
-}
+/* PCI access is provided by the shared pci.c / pci.h module.
+ * The pci_read32 / pci_write32 functions replace the former private stubs. */
 
 /* ============================================================================
  * RX ring buffer helpers
@@ -238,7 +216,7 @@ void rtl8139_init(void)
     /* ---- PCI scan: look for Realtek 8139 (vendor 0x10EC, device 0x8139) -- */
     for (bus = 0; bus < 8u && !found; bus++) {
         for (slot = 0; slot < 32u && !found; slot++) {
-            uint32_t id = pci_read(bus, slot, func, 0x00u);
+            uint32_t id = pci_read32(bus, slot, func, 0x00u);
             if ((id & 0xFFFFu) != 0x10ECu) continue;  /* vendor */
             if ((id >> 16)     != 0x8139u) continue;  /* device */
             found = 1;
@@ -255,15 +233,15 @@ void rtl8139_init(void)
     slot--;
 
     /* ---- Read BAR0 (I/O base) and interrupt line ------------------------- */
-    uint32_t bar0 = pci_read(bus, slot, func, 0x10u);
+    uint32_t bar0 = pci_read32(bus, slot, func, 0x10u);
     g_iobase = (uint16_t)(bar0 & ~0x3u);          /* clear I/O indicator bits */
 
-    uint32_t irq_reg = pci_read(bus, slot, func, 0x3Cu);
+    uint32_t irq_reg = pci_read32(bus, slot, func, 0x3Cu);
     g_irq = (uint8_t)(irq_reg & 0xFFu);
 
     /* ---- Enable PCI I/O space + bus mastering ---------------------------- */
-    uint32_t pci_cmd = pci_read(bus, slot, func, 0x04u);
-    pci_write(bus, slot, func, 0x04u, pci_cmd | 0x07u); /* I/O + Mem + BusMaster */
+    uint32_t pci_cmd = pci_read32(bus, slot, func, 0x04u);
+    pci_write32(bus, slot, func, 0x04u, pci_cmd | 0x07u); /* I/O + Mem + BusMaster */
 
     /* ---- Map DMA buffer region (4 MB PSE page at PDE[3] = 0xC00000) ----- */
     paging_map_framebuffer(NET_RX_BUF_PHYS);

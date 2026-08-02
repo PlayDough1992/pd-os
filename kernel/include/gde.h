@@ -11,12 +11,14 @@
 
 #define GDE_SCREEN_W    1024
 #define GDE_SCREEN_H     768
-#define GDE_TASKBAR_H     30   /* pixels, pinned to bottom */
-#define GDE_TITLEBAR_H    22   /* title bar height         */
+#define GDE_TASKBAR_H     32   /* pixels, pinned to bottom */
+#define GDE_TITLEBAR_H    26   /* title bar height         */
 #define GDE_BORDER_W       2   /* window border thickness  */
-#define GDE_BTN_W         18   /* title-bar button width   */
+#define GDE_BTN_W         22   /* title-bar button width   */
 #define GDE_BTN_H         16   /* title-bar button height  */
-#define GDE_RESIZE_SZ     12   /* resize handle (corner)   */
+#define GDE_RESIZE_SZ     16   /* resize handle (corner)   */
+#define GDE_MENUBAR_H     22   /* menu-bar strip           */
+#define GDE_STATUSBAR_H   18   /* status-bar strip         */
 
 /* ---- Limits -------------------------------------------------------------- */
 
@@ -26,34 +28,36 @@
 
 /* ---- Color palette ------------------------------------------------------- */
 
-#define COL_DESKTOP       GFX_RGB(0,  90, 110)
-#define COL_TASKBAR       GFX_RGB(28, 28, 32)
-#define COL_TASKBAR_BTN   GFX_RGB(55, 55, 62)
-#define COL_TASKBAR_SEP   GFX_RGB(70, 70, 78)
-#define COL_START_BG      GFX_RGB(35, 35, 42)
-#define COL_START_HOVER   GFX_RGB(55, 55, 70)
-#define COL_START_SEP     GFX_RGB(60, 60, 70)
-#define COL_WIN_BORDER_A  GFX_RGB(80, 120, 200)  /* active border   */
-#define COL_WIN_BORDER_I  GFX_RGB(90,  90,  95)  /* inactive border */
-#define COL_TITLEBAR_A1   GFX_RGB(20,  70, 160)  /* gradient top    */
-#define COL_TITLEBAR_A2   GFX_RGB(10,  50, 130)  /* gradient bottom */
-#define COL_TITLEBAR_I1   GFX_RGB(75,  75,  80)
-#define COL_TITLEBAR_I2   GFX_RGB(60,  60,  65)
-#define COL_WIN_BODY      GFX_RGB(245,245,245)
-#define COL_WIN_SHADOW    GFX_RGB(0,   0,   0)
-#define COL_BTN_CLOSE     GFX_RGB(180, 40,  40)
-#define COL_BTN_MAX       GFX_RGB(50, 160,  50)
-#define COL_BTN_MIN       GFX_RGB(190,140,  20)
-#define COL_BTN_HOVER     GFX_RGB(255,255,255)
-#define COL_ICON_BG       GFX_RGB(255,255,255)
-#define COL_ICON_TEXT     GFX_RGB(255,255,255)
-#define COL_MENU_BG       GFX_RGB(38,  38,  45)
-#define COL_MENU_BORDER   GFX_RGB(80,  80,  90)
-#define COL_MENU_HOVER    GFX_RGB(55,  90, 170)
-#define COL_MENU_TEXT     GFX_RGB(230,230,230)
-#define COL_TERM_BG       GFX_RGB(15,  15,  20)
-#define COL_TERM_FG       GFX_RGB(200,230,200)
-#define COL_TERM_CURSOR   GFX_RGB(180,230,180)
+#define COL_DESKTOP       GFX_RGB(  0,  96, 118)
+#define COL_TASKBAR       GFX_RGB( 20,  20,  24)
+#define COL_TASKBAR_BTN   GFX_RGB( 45,  45,  52)
+#define COL_TASKBAR_SEP   GFX_RGB( 55,  55,  62)
+#define COL_START_BG      GFX_RGB( 28,  28,  36)
+#define COL_START_HOVER   GFX_RGB( 50,  50,  65)
+#define COL_START_SEP     GFX_RGB( 52,  52,  62)
+#define COL_WIN_BORDER_A  GFX_RGB( 26,  26,  30)  /* focused border    */
+#define COL_WIN_BORDER_I  GFX_RGB( 68,  68,  74)  /* unfocused border  */
+#define COL_TITLEBAR_A1   GFX_RGB( 86,  86,  92)  /* gradient top      */
+#define COL_TITLEBAR_A2   GFX_RGB( 48,  48,  55)  /* gradient bottom   */
+#define COL_TITLEBAR_I1   GFX_RGB(108, 108, 114)
+#define COL_TITLEBAR_I2   GFX_RGB( 78,  78,  84)
+#define COL_WIN_BODY      GFX_RGB(102, 102, 108)
+#define COL_WIN_MENUBAR   GFX_RGB( 80,  80,  86)
+#define COL_WIN_STATUSBAR GFX_RGB( 58,  58,  64)
+#define COL_WIN_SHADOW    GFX_RGB(  0,   0,   0)
+#define COL_BTN_CLOSE     GFX_RGB(185,  38,  38)
+#define COL_BTN_MAX       GFX_RGB( 24, 112, 172)
+#define COL_BTN_MIN       GFX_RGB( 24, 112, 172)
+#define COL_BTN_HOVER     GFX_RGB(255, 255, 255)
+#define COL_ICON_BG       GFX_RGB(255, 255, 255)
+#define COL_ICON_TEXT     GFX_RGB(255, 255, 255)
+#define COL_MENU_BG       GFX_RGB( 36,  36,  43)
+#define COL_MENU_BORDER   GFX_RGB( 75,  75,  85)
+#define COL_MENU_HOVER    GFX_RGB( 50,  88, 165)
+#define COL_MENU_TEXT     GFX_RGB(228, 228, 228)
+#define COL_TERM_BG       GFX_RGB( 14,  14,  18)
+#define COL_TERM_FG       GFX_RGB(195, 228, 195)
+#define COL_TERM_CURSOR   GFX_RGB(175, 228, 175)
 
 /* ---- Window state -------------------------------------------------------- */
 
@@ -126,9 +130,9 @@ void          wm_minimize(gde_window_t *win);
 
 /* Geometry helpers — use _w to avoid collision with the ->w width field */
 #define WIN_CX(_w)  ((_w)->x + GDE_BORDER_W)
-#define WIN_CY(_w)  ((_w)->y + GDE_TITLEBAR_H)
+#define WIN_CY(_w)  ((_w)->y + GDE_TITLEBAR_H + GDE_MENUBAR_H)
 #define WIN_CW(_w)  ((_w)->w - GDE_BORDER_W * 2)
-#define WIN_CH(_w)  ((_w)->h - GDE_TITLEBAR_H - GDE_BORDER_W)
+#define WIN_CH(_w)  ((_w)->h - GDE_TITLEBAR_H - GDE_MENUBAR_H - GDE_STATUSBAR_H - GDE_BORDER_W)
 
 /* taskbar.c */
 void taskbar_init(void);

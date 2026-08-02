@@ -17,6 +17,11 @@
 #include "paging.h"
 #include "kheap.h"
 #include "ata.h"
+#include "pci.h"
+#include "usb.h"
+
+static inline uint8_t k_inb(uint16_t port)
+{ uint8_t v; __asm__ volatile("inb %1,%0":"=a"(v):"Nd"(port)); return v; }
 #include "rtl8139.h"
 #include "net.h"
 #include "vfs.h"
@@ -120,20 +125,130 @@ void kernel_main(void)
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
     kprintf("  (0) Probing ATA drives...");
-    ata_init();
+    ata_init();  /* also populates g_drives[0] */
     {
-        const ata_drive_t *drv = ata_get_drive();
-        if (drv->present) {
-            vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-            kprintf("  (X) %s (%u KB)\n",
-                    drv->model,
-                    (drv->total_sectors / 2u));
-        } else {
+        int found = 0, n;
+        for (n = 0; n < ATA_MAX_DRIVES; n++) {
+            const ata_drive_t *d = ata_get_drive_n(n);
+            if (d && d->present) {
+                vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+                kprintf("  (X) Drive %u: %s (%u MB)\n",
+                        n, d->model, d->total_sectors / 2048u);
+                found++;
+            }
+        }
+        if (!found) {
             vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
-            kprintf("  (!) No ATA drive detected\n");
+            kprintf("  (!) No legacy ATA drive (status=0x%02x)\n",
+                    k_inb(0x1F7));
+            /* Check if an AHCI SATA controller exists on PCI */
+            {
+                uint8_t ab = 0, ad = 0, af = 0;
+                if (pci_find_class(0x01, 0x06, 0x01, &ab, &ad, &af)) {
+                    vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+                    kprintf("  (!) AHCI controller found at PCI %02x:%02x.%x\n",
+                            ab, ad, af);
+                    kprintf("  (!) BIOS SATA mode is AHCI — change to\n");
+                    kprintf("  (!) 'Compatible' or 'IDE' mode to use installer.\n");
+                }
+            }
         }
     }
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+
+    /* ---- Enable interrupts before wizard so keyboard IRQ fires ----------- */
+    proc_init();
+    proc_create("idle", idle_task);
+    __asm__ volatile ("sti");
+
+#ifndef GDE_BUILD
+    /* ---- Installer wizard ------------------------------------------------ */
+    {
+        int n, n_drives = 0;
+        int drive_idx[ATA_MAX_DRIVES];
+
+        for (n = 0; n < ATA_MAX_DRIVES; n++) {
+            const ata_drive_t *d = ata_get_drive_n(n);
+            if (d && d->present)
+                drive_idx[n_drives++] = n;
+        }
+
+        if (n_drives > 0) {
+            char ch;
+            int  sel = -1;
+
+            kprintf("\n  +---------------------------------+\n");
+            kprintf("  |   PD-OS USB Installer Wizard    |\n");
+            kprintf("  +---------------------------------+\n");
+            kprintf("  Select a drive to install PD-OS onto:\n\n");
+            for (n = 0; n < n_drives; n++) {
+                const ata_drive_t *d = ata_get_drive_n(drive_idx[n]);
+                kprintf("    [%u]  Drive %u: %s (%u MB)\n",
+                        n + 1, drive_idx[n], d->model,
+                        d->total_sectors / 2048u);
+            }
+            kprintf("\n    [S]  Skip installer, boot normally\n\n");
+            kprintf("  WARNING: ALL DATA ON THE CHOSEN DRIVE WILL BE LOST!\n\n");
+
+            /* Keep prompting until valid key */
+            do {
+                kprintf("  Your choice: ");
+                ch = keyboard_getchar();
+                kprintf("%c\n", ch);
+                if (ch == 's' || ch == 'S') { sel = -1; break; }
+                if (ch >= '1' && ch < '1' + n_drives) {
+                    sel = drive_idx[ch - '1'];
+                    break;
+                }
+                vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+                kprintf("  Invalid choice — try again.\n");
+                vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+            } while (1);
+
+            if (sel >= 0) {
+                const ata_drive_t *target = ata_get_drive_n(sel);
+                kprintf("\n  Installing to drive %u: %s\n", sel, target->model);
+                kprintf("  (0) Initialising USB storage...\n");
+                usb_init();
+                if (usb_available()) {
+                    uint8_t  ibuf[512];
+                    uint32_t ilba;
+                    uint32_t ierr = 0;
+                    kprintf("  (0) Copying 512 sectors...\n");
+                    for (ilba = 0; ilba < 512; ilba++) {
+                        if (usb_read_sector(ilba, ibuf) != 0)
+                            { ierr++; continue; }
+                        if (ata_write_sectors_raw(sel, ilba, 1, ibuf) != 0)
+                            { ierr++; }
+                        if ((ilba & 63u) == 0u)
+                            kprintf("  %u / 512\n", ilba);
+                    }
+                    if (ierr == 0) {
+                        vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
+                        kprintf("  (X) Install complete.\n");
+                    } else {
+                        vga_set_color(VGA_COLOR_YELLOW, VGA_COLOR_BLACK);
+                        kprintf("  (!) Install complete with %u errors.\n", ierr);
+                    }
+                    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+                    kprintf("  Remove USB drive and reboot to boot from SATA.\n");
+                } else {
+                    vga_set_color(VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+                    kprintf("  (!) USB storage not found — install aborted.\n");
+                    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+                }
+                for (;;) __asm__ volatile ("hlt");
+            }
+            /* User pressed S — boot normally, no USB init,
+               BIOS retains full keyboard/mouse emulation.                */
+        } else {
+            /* No SATA drives — USB-only mode, init USB for disk I/O      */
+            kprintf("  (0) Probing USB (EHCI)...");
+            usb_init();
+            vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
+        }
+    }
+#endif /* !GDE_BUILD */
 
     kprintf("  (0) Probing network card...");
     rtl8139_init();
@@ -228,21 +343,9 @@ void kernel_main(void)
     }
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
 
-    /* ---- Process manager ------------------------------------------------- */
-    /* MUST be initialised before sti so no PIT interrupt fires with an        */
-    /* uninitialised g_procs table (would return saved_esp=0 → triple fault). */
-    vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-    kprintf("  (0) Initialising process manager...");
-    proc_init();
-    proc_create("idle", idle_task);
     vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-    kprintf("  (X) Scheduler ready  (%d tasks)\n", proc_count_active());
+    kprintf("\n  Interrupts online.  (%d tasks)\n", proc_count_active());
     vga_set_color(VGA_COLOR_WHITE, VGA_COLOR_BLACK);
-
-    /* ---- Enable interrupts ----------------------------------------------- */
-    __asm__ volatile ("sti");
-    vga_set_color(VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-    kprintf("\n  Interrupts online.\n");
 
 #ifdef GDE_BUILD
     }  /* end of "if VBE ok" block opened after paging_init() */

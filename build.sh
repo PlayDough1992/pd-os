@@ -83,6 +83,8 @@ build() {
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/keyboard.c"     -o "$BUILD_DIR/keyboard.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/mouse.c"         -o "$BUILD_DIR/mouse.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/ata.c"           -o "$BUILD_DIR/ata.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/pci.c"           -o "$BUILD_DIR/pci.o"
+    $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/usb.c"           -o "$BUILD_DIR/usb.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/drivers/rtl8139.c"       -o "$BUILD_DIR/rtl8139.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/net/net.c"               -o "$BUILD_DIR/net.o"
     $CROSS_CC $CFLAGS $IFLAGS "$KERNEL_DIR/net/arp.c"               -o "$BUILD_DIR/arp.o"
@@ -122,6 +124,8 @@ build() {
         "$BUILD_DIR/keyboard.o" \
         "$BUILD_DIR/mouse.o" \
         "$BUILD_DIR/ata.o" \
+        "$BUILD_DIR/pci.o" \
+        "$BUILD_DIR/usb.o" \
         "$BUILD_DIR/rtl8139.o" \
         "$BUILD_DIR/net.o" \
         "$BUILD_DIR/arp.o" \
@@ -157,6 +161,14 @@ build() {
     truncate -s $((DISK_SIZE * 512)) "$DISK_IMAGE"
     dd if="$BOOTLOADER_BIN"  of="$DISK_IMAGE" conv=notrunc bs=512 seek=0 count=1  2>/dev/null
     dd if="$STAGE2_BIN"      of="$DISK_IMAGE" conv=notrunc bs=512 seek=1          2>/dev/null
+    # Kernel descriptor at LBA 6 — magic + kernel start LBA, read by stage2 from memory
+    python3 -c "
+import struct, sys
+d = bytearray(512)
+struct.pack_into('<I', d, 0, 0xB007B007)  # magic
+struct.pack_into('<I', d, 4, 7)            # kernel start LBA
+sys.stdout.buffer.write(bytes(d))
+" | dd of="$DISK_IMAGE" conv=notrunc bs=512 seek=6 2>/dev/null
     dd if="$KERNEL_BIN"      of="$DISK_IMAGE" conv=notrunc bs=512 seek=7          2>/dev/null
     echo -e "${GREEN}  [OK] Disk image: $DISK_IMAGE (64 MB)${NC}"
 
@@ -629,6 +641,34 @@ case "$TARGET" in
         echo -e "${CYAN}Starting QEMU...${NC}"
         echo "Press Ctrl+Alt+G to release mouse, Ctrl+C to quit"
         qemu-system-i386 -drive format=raw,file="$DISK_IMAGE" -m 128M -device rtl8139
+        ;;
+    run-installer)
+        build
+        SATA_IMG="$BUILD_DIR/sata.img"
+        # Create a blank 64 MB SATA target image if it doesn't exist
+        if [ ! -f "$SATA_IMG" ]; then
+            echo -e "${CYAN}  Creating blank SATA target image (64 MB)...${NC}"
+            dd if=/dev/zero of="$SATA_IMG" bs=512 count=131072 status=none
+            echo -e "${GREEN}  [OK] $SATA_IMG created${NC}"
+        fi
+        # Create a read-only USB source copy so QEMU can open it alongside the IDE drive
+        USB_IMG="$BUILD_DIR/usb-source.img"
+        cp "$DISK_IMAGE" "$USB_IMG"
+        echo -e "${CYAN}Starting QEMU (installer mode)...${NC}"
+        echo -e "${YELLOW}  Drive layout:${NC}"
+        echo -e "${YELLOW}    ATA Drive 0 (IDE master) : pd-os.img  — boot drive${NC}"
+        echo -e "${YELLOW}    ATA Drive 1 (IDE slave)  : sata.img   — install TARGET${NC}"
+        echo -e "${YELLOW}    USB (EHCI)               : usb-source.img — installer source${NC}"
+        echo -e "${YELLOW}  In the wizard, SELECT DRIVE 1 as the target.${NC}"
+        echo "Press Ctrl+Alt+G to release mouse, Ctrl+C to quit"
+        qemu-system-i386 \
+            -drive format=raw,file="$DISK_IMAGE",if=ide,index=0 \
+            -drive format=raw,file="$SATA_IMG",if=ide,index=1 \
+            -drive if=none,id=usbdisk,format=raw,file="$USB_IMG" \
+            -device usb-ehci,id=ehci \
+            -device usb-storage,bus=ehci.0,drive=usbdisk \
+            -m 256M \
+            -device rtl8139
         ;;
     run-debug)
         build

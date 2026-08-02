@@ -11,6 +11,7 @@
  * ============================================================================ */
 
 #include "ata.h"
+#include "usb.h"
 
 /* ---- Port base addresses -------------------------------------------------- */
 #define ATA_BASE  0x1F0u    /* primary channel data/register base             */
@@ -129,6 +130,9 @@ static void extract_model(const uint16_t *id, char *out)
 
 /* ---- Public API ----------------------------------------------------------- */
 
+/* Forward declaration — full definition in the multi-drive section below */
+static ata_drive_t g_drives[ATA_MAX_DRIVES];
+
 void ata_init(void)
 {
     uint16_t id[256];
@@ -191,6 +195,9 @@ void ata_init(void)
     g_drive.lba_supported = (id[49] >> 9) & 1u;
     g_drive.total_sectors = ((uint32_t)id[61] << 16) | id[60];
     extract_model(id, g_drive.model);
+
+    /* Mirror into g_drives[0] so the multi-drive API also sees this drive */
+    g_drives[0] = g_drive;
 }
 
 const ata_drive_t *ata_get_drive(void)
@@ -202,6 +209,16 @@ int ata_read_sectors(uint32_t lba, uint8_t count, void *buf)
 {
     uint16_t *ptr = (uint16_t *)buf;
     uint8_t i;
+
+    /* When booted from USB, the ATA PIO driver cannot reach the drive.
+     * Redirect through the USB mass storage driver transparently. */
+    if (usb_available()) {
+        uint8_t *p = (uint8_t *)buf;
+        for (i = 0; i < count; i++, p += ATA_SECTOR_SIZE) {
+            if (usb_read_sector(lba + i, p) != 0) return -1;
+        }
+        return 0;
+    }
 
     if (!g_drive.present)
         return -1;
@@ -238,6 +255,15 @@ int ata_write_sectors(uint32_t lba, uint8_t count, const void *buf)
 {
     const uint16_t *ptr = (const uint16_t *)buf;
     uint8_t i;
+
+    /* USB fallback: forward writes to USB mass storage driver */
+    if (usb_available()) {
+        const uint8_t *p = (const uint8_t *)buf;
+        for (i = 0; i < count; i++, p += ATA_SECTOR_SIZE) {
+            if (usb_write_sector(lba + i, p) != 0) return -1;
+        }
+        return 0;
+    }
 
     if (!g_drive.present)
         return -1;
@@ -277,7 +303,7 @@ int ata_write_sectors(uint32_t lba, uint8_t count, const void *buf)
  * Multi-drive support  (primary channel master + slave)
  * ============================================================================ */
 
-static ata_drive_t g_drives[ATA_MAX_DRIVES];
+/* g_drives[] declared above ata_init() so it can be written by ata_init() */
 
 /* Probe one drive (dev_idx 0=master, 1=slave) into g_drives[dev_idx]. */
 static void ata_probe_one(int dev_idx)
