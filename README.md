@@ -44,6 +44,11 @@ Typing a prefix instantly shows a live context menu of matching commands. Use �
 
 ![Autocomplete — 's' prefix with selection](docs/screenshots/08-suggestion-menu.png)
 
+### GDE - PD-OS's official Graphical Desktop Environment
+Simple desktop environment for GUI users to check out.
+
+![GDE - 'c' prefix](docs/screenshots/GDEScreenshot001.png)
+
 ---
 
 ## 🎯 Project Goals
